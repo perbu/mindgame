@@ -15,6 +15,7 @@ import (
 
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/policy"
 )
 
 // Harness manages a set of named httptest.Server instances and provides
@@ -23,19 +24,21 @@ type Harness struct {
 	t        *testing.T
 	store    *db.Store
 	ca       *ca.CA
+	policy   *policy.Cache
 	proxy    *httptest.Server
 	backends map[string]*httptest.Server
 }
 
 // New creates a Harness with all pre-defined backends and a proxy server
 // wrapping the given handler. All servers are cleaned up via t.Cleanup.
-func New(t *testing.T, store *db.Store, proxyHandler http.Handler, authority *ca.CA) *Harness {
+func New(t *testing.T, store *db.Store, proxyHandler http.Handler, authority *ca.CA, pol *policy.Cache) *Harness {
 	t.Helper()
 
 	h := &Harness{
 		t:        t,
 		store:    store,
 		ca:       authority,
+		policy:   pol,
 		backends: make(map[string]*httptest.Server),
 	}
 
@@ -107,6 +110,16 @@ func (h *Harness) TLSClient() *http.Client {
 		},
 		Timeout: 10 * time.Second,
 	}
+}
+
+// Policy returns the policy cache for test access.
+func (h *Harness) Policy() *policy.Cache {
+	return h.policy
+}
+
+// Store returns the DB store for test access.
+func (h *Harness) Store() *db.Store {
+	return h.store
 }
 
 // --- Normal backends ---

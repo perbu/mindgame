@@ -9,11 +9,15 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/proxy"
 )
+
+const testReloadInterval = time.Hour
 
 func TestIntegrationHTTPProxy(t *testing.T) {
 	// 1. Start an origin server.
@@ -37,7 +41,13 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 		t.Fatalf("ca.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority)
+	pol, err := policy.NewCache(store, testReloadInterval)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	defer pol.Stop()
+
+	handler := proxy.New(store, authority, pol)
 
 	// 3. Start proxy on a random port.
 	proxyServer := httptest.NewServer(handler)
@@ -115,7 +125,13 @@ func TestIntegrationCONNECT(t *testing.T) {
 		t.Fatalf("ca.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority)
+	pol2, err := policy.NewCache(store, testReloadInterval)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	defer pol2.Stop()
+
+	handler := proxy.New(store, authority, pol2)
 	// Let the proxy trust the httptest backend's self-signed cert.
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},

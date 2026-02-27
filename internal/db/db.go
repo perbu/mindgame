@@ -7,6 +7,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// DomainRule represents a row in the domain_rules table.
+type DomainRule struct {
+	Host      string
+	Tier      string // "allow" or "deny"
+	Banned    bool
+	CreatedAt time.Time
+	Note      string
+}
+
 // AuditEntry represents a single row in the audit_log table.
 type AuditEntry struct {
 	ID          int64
@@ -127,4 +136,73 @@ func (s *Store) ListAuditEntries(limit int) ([]AuditEntry, error) {
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// LookupDomainRule returns the domain rule for the given host, or (nil, nil) if not found.
+func (s *Store) LookupDomainRule(host string) (*DomainRule, error) {
+	var r DomainRule
+	err := s.db.QueryRow(`SELECT host, tier, banned, created_at, note FROM domain_rules WHERE host = ?`, host).
+		Scan(&r.Host, &r.Tier, &r.Banned, &r.CreatedAt, &r.Note)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ListDomainRules returns all domain rules ordered by host.
+func (s *Store) ListDomainRules() ([]DomainRule, error) {
+	rows, err := s.db.Query(`SELECT host, tier, banned, created_at, note FROM domain_rules ORDER BY host`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []DomainRule
+	for rows.Next() {
+		var r DomainRule
+		if err := rows.Scan(&r.Host, &r.Tier, &r.Banned, &r.CreatedAt, &r.Note); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// InsertDomainRule upserts a single domain rule.
+func (s *Store) InsertDomainRule(r *DomainRule) error {
+	_, err := s.db.Exec(`
+		INSERT INTO domain_rules (host, tier, banned, created_at, note)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(host) DO UPDATE SET tier=excluded.tier, banned=excluded.banned, note=excluded.note`,
+		r.Host, r.Tier, r.Banned, r.CreatedAt, r.Note,
+	)
+	return err
+}
+
+// InsertDomainRules batch-upserts domain rules in a single transaction.
+func (s *Store) InsertDomainRules(rules []DomainRule) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO domain_rules (host, tier, banned, created_at, note)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(host) DO UPDATE SET tier=excluded.tier, banned=excluded.banned, note=excluded.note`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range rules {
+		if _, err := stmt.Exec(r.Host, r.Tier, r.Banned, r.CreatedAt, r.Note); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

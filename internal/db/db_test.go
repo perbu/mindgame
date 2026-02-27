@@ -78,3 +78,149 @@ func TestInsertAndListAuditEntries(t *testing.T) {
 		t.Errorf("resp_status = %d, want %d", got.RespStatus, 200)
 	}
 }
+
+func TestInsertAndLookupDomainRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().Truncate(time.Second)
+	r := &DomainRule{
+		Host:      "example.com",
+		Tier:      "allow",
+		Banned:    false,
+		CreatedAt: now,
+		Note:      "test rule",
+	}
+	if err := store.InsertDomainRule(r); err != nil {
+		t.Fatalf("InsertDomainRule: %v", err)
+	}
+
+	got, err := store.LookupDomainRule("example.com")
+	if err != nil {
+		t.Fatalf("LookupDomainRule: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil rule")
+	}
+	if got.Host != "example.com" {
+		t.Errorf("host = %q, want %q", got.Host, "example.com")
+	}
+	if got.Tier != "allow" {
+		t.Errorf("tier = %q, want %q", got.Tier, "allow")
+	}
+	if got.Note != "test rule" {
+		t.Errorf("note = %q, want %q", got.Note, "test rule")
+	}
+}
+
+func TestLookupDomainRuleMissing(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.LookupDomainRule("nonexistent.com")
+	if err != nil {
+		t.Fatalf("LookupDomainRule: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %+v", got)
+	}
+}
+
+func TestInsertDomainRuleUpsert(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().Truncate(time.Second)
+	r := &DomainRule{Host: "example.com", Tier: "allow", CreatedAt: now}
+	if err := store.InsertDomainRule(r); err != nil {
+		t.Fatalf("InsertDomainRule: %v", err)
+	}
+
+	// Upsert with different tier.
+	r2 := &DomainRule{Host: "example.com", Tier: "deny", CreatedAt: now, Note: "updated"}
+	if err := store.InsertDomainRule(r2); err != nil {
+		t.Fatalf("InsertDomainRule (upsert): %v", err)
+	}
+
+	got, err := store.LookupDomainRule("example.com")
+	if err != nil {
+		t.Fatalf("LookupDomainRule: %v", err)
+	}
+	if got.Tier != "deny" {
+		t.Errorf("tier = %q, want %q", got.Tier, "deny")
+	}
+	if got.Note != "updated" {
+		t.Errorf("note = %q, want %q", got.Note, "updated")
+	}
+}
+
+func TestInsertDomainRulesBatch(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().Truncate(time.Second)
+	rules := []DomainRule{
+		{Host: "a.com", Tier: "allow", CreatedAt: now},
+		{Host: "b.com", Tier: "deny", CreatedAt: now},
+		{Host: "c.com", Tier: "allow", CreatedAt: now},
+	}
+	if err := store.InsertDomainRules(rules); err != nil {
+		t.Fatalf("InsertDomainRules: %v", err)
+	}
+
+	all, err := store.ListDomainRules()
+	if err != nil {
+		t.Fatalf("ListDomainRules: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(all))
+	}
+}
+
+func TestListDomainRules(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().Truncate(time.Second)
+	rules := []DomainRule{
+		{Host: "z.com", Tier: "deny", CreatedAt: now},
+		{Host: "a.com", Tier: "allow", CreatedAt: now},
+		{Host: "m.com", Tier: "deny", CreatedAt: now, Note: "middle"},
+	}
+	if err := store.InsertDomainRules(rules); err != nil {
+		t.Fatalf("InsertDomainRules: %v", err)
+	}
+
+	all, err := store.ListDomainRules()
+	if err != nil {
+		t.Fatalf("ListDomainRules: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(all))
+	}
+	// Ordered by host.
+	if all[0].Host != "a.com" {
+		t.Errorf("first host = %q, want %q", all[0].Host, "a.com")
+	}
+	if all[1].Host != "m.com" {
+		t.Errorf("second host = %q, want %q", all[1].Host, "m.com")
+	}
+	if all[2].Host != "z.com" {
+		t.Errorf("third host = %q, want %q", all[2].Host, "z.com")
+	}
+}

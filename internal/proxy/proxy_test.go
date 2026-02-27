@@ -8,12 +8,16 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/policy"
 )
 
-func setupTest(t *testing.T) (*Handler, *db.Store) {
+const testReloadInterval = time.Hour
+
+func setupTest(t *testing.T) (*Handler, *db.Store, *policy.Cache) {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := db.Open(filepath.Join(dir, "test.db"))
@@ -27,11 +31,17 @@ func setupTest(t *testing.T) (*Handler, *db.Store) {
 		t.Fatalf("ca.New: %v", err)
 	}
 
-	return New(store, authority), store
+	pol, err := policy.NewCache(store, testReloadInterval)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	return New(store, authority, pol), store, pol
 }
 
 func TestHandleHTTPForward(t *testing.T) {
-	handler, store := setupTest(t)
+	handler, store, _ := setupTest(t)
 
 	// Origin server.
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +100,7 @@ func TestHandleHTTPForward(t *testing.T) {
 }
 
 func TestHandleHTTPForwardWithBody(t *testing.T) {
-	handler, _ := setupTest(t)
+	handler, _, _ := setupTest(t)
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -114,7 +124,7 @@ func TestHandleHTTPForwardWithBody(t *testing.T) {
 }
 
 func TestHopByHopHeadersStripped(t *testing.T) {
-	handler, _ := setupTest(t)
+	handler, _, _ := setupTest(t)
 
 	var gotProxyAuth string
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +150,7 @@ func TestHopByHopHeadersStripped(t *testing.T) {
 }
 
 func TestHandleHTTPRequiresXReason(t *testing.T) {
-	handler, _ := setupTest(t)
+	handler, _, _ := setupTest(t)
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -162,5 +172,124 @@ func TestHandleHTTPRequiresXReason(t *testing.T) {
 	body, _ := io.ReadAll(rec.Result().Body)
 	if !bytes.Contains(body, []byte("X-Reason")) {
 		t.Errorf("body = %q, want mention of X-Reason", string(body))
+	}
+}
+
+func TestHandleHTTPDenyDomain(t *testing.T) {
+	handler, store, pol := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	// Parse origin host and insert deny rule.
+	parsedURL, _ := url.Parse(origin.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: parsedURL.Hostname(), Tier: "deny", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", origin.URL+"/test", nil)
+	req.URL, _ = url.Parse(origin.URL + "/test")
+	req.RequestURI = origin.URL + "/test"
+	req.Header.Set("X-Reason", "should be denied")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Action != "DENY" {
+		t.Errorf("action = %q, want DENY", entries[0].Action)
+	}
+}
+
+func TestHandleHTTPAllowDomain(t *testing.T) {
+	handler, store, pol := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("allowed"))
+	}))
+	defer origin.Close()
+
+	parsedURL, _ := url.Parse(origin.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: parsedURL.Hostname(), Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Request WITHOUT X-Reason — should still succeed because domain is allowed.
+	req := httptest.NewRequest("GET", origin.URL+"/test", nil)
+	req.URL, _ = url.Parse(origin.URL + "/test")
+	req.RequestURI = origin.URL + "/test"
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Action != "ALLOW" {
+		t.Errorf("action = %q, want ALLOW", entries[0].Action)
+	}
+}
+
+func TestHandleHTTPDefaultRejectLogged(t *testing.T) {
+	handler, store, _ := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	// Default tier (no domain rule), no X-Reason → REJECT.
+	parsedURL, _ := url.Parse(origin.URL + "/test")
+	req := httptest.NewRequest("GET", origin.URL+"/test", nil)
+	req.URL = parsedURL
+	req.RequestURI = origin.URL + "/test"
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Action != "REJECT" {
+		t.Errorf("action = %q, want REJECT", entries[0].Action)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/proxy"
 )
 
@@ -20,6 +21,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "audit.db", "path to SQLite database")
 	caDir := flag.String("ca-dir", ".", "directory for CA certificate and key")
+	seedPath := flag.String("seed", "", "path to seed file with domain rules")
 	flag.Parse()
 
 	store, err := db.Open(*dbPath)
@@ -36,7 +38,24 @@ func main() {
 	}
 	log.Printf("CA cert: %s, key: %s", certPath, keyPath)
 
-	handler := proxy.New(store, authority)
+	if *seedPath != "" {
+		rules, err := policy.ParseSeedFile(*seedPath)
+		if err != nil {
+			log.Fatalf("failed to parse seed file: %v", err)
+		}
+		if err := store.InsertDomainRules(rules); err != nil {
+			log.Fatalf("failed to insert seed rules: %v", err)
+		}
+		log.Printf("loaded %d domain rules from %s", len(rules), *seedPath)
+	}
+
+	pol, err := policy.NewCache(store, 30*time.Second)
+	if err != nil {
+		log.Fatalf("failed to create policy cache: %v", err)
+	}
+	defer pol.Stop()
+
+	handler := proxy.New(store, authority, pol)
 
 	srv := &http.Server{
 		Addr:    *addr,

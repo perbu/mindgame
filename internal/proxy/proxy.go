@@ -15,6 +15,7 @@ import (
 
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/policy"
 )
 
 // Hop-by-hop headers that must not be forwarded.
@@ -34,14 +35,16 @@ var hopByHopHeaders = []string{
 type Handler struct {
 	store     *db.Store
 	ca        *ca.CA
+	policy    *policy.Cache
 	transport http.RoundTripper
 }
 
-// New creates a proxy handler backed by the given store and certificate authority.
-func New(store *db.Store, authority *ca.CA) *Handler {
+// New creates a proxy handler backed by the given store, certificate authority, and policy cache.
+func New(store *db.Store, authority *ca.CA, pol *policy.Cache) *Handler {
 	return &Handler{
-		store: store,
-		ca:    authority,
+		store:  store,
+		ca:     authority,
+		policy: pol,
 		transport: &http.Transport{
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 			TLSHandshakeTimeout:  10 * time.Second,
@@ -138,10 +141,45 @@ func (h *Handler) forwardRequest(r *http.Request, reqBody []byte) (*forwardedRes
 	}, nil
 }
 
+// logAction logs an audit entry for requests that are denied or rejected
+// (no upstream request made).
+func (h *Handler) logAction(r *http.Request, action string) {
+	reqHeaders, _ := json.Marshal(r.Header)
+	entry := &db.AuditEntry{
+		Timestamp:   time.Now(),
+		Method:      r.Method,
+		URL:         r.URL.String(),
+		Host:        r.URL.Hostname(),
+		Reason:      r.Header.Get("X-Reason"),
+		ReqHeaders:  string(reqHeaders),
+		ReqBody:     "",
+		RespStatus:  0,
+		RespBody:    "",
+		RiskScore:   0,
+		RiskSignals: "[]",
+		Action:      action,
+	}
+	if err := h.store.InsertAuditEntry(entry); err != nil {
+		log.Printf("audit log error: %v", err)
+	}
+}
+
 func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	if err := requireReason(r); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	decision := h.policy.Evaluate(r.URL.Hostname())
+
+	switch decision.Tier {
+	case policy.TierDeny:
+		h.logAction(r, "DENY")
+		http.Error(w, "domain denied by policy", http.StatusForbidden)
 		return
+	case policy.TierAllow:
+		// Skip X-Reason check.
+	default:
+		if err := requireReason(r); err != nil {
+			h.logAction(r, "REJECT")
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	reqBody, err := io.ReadAll(r.Body)
@@ -174,6 +212,21 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	hostname, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		hostname = r.Host
+	}
+
+	// Check deny before hijacking — we can still use http.Error.
+	decision := h.policy.Evaluate(hostname)
+	if decision.Tier == policy.TierDeny {
+		// Build a synthetic request for logging.
+		synth := &http.Request{
+			Method: r.Method,
+			URL:    r.URL,
+			Header: r.Header,
+		}
+		synth.URL.Host = hostname
+		h.logAction(synth, "DENY")
+		http.Error(w, "domain denied by policy", http.StatusForbidden)
+		return
 	}
 
 	hijacker, ok := w.(http.Hijacker)
@@ -225,9 +278,13 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		req.URL.Host = targetHost
 		req.RequestURI = ""
 
-		if err := requireReason(req); err != nil {
-			writeErrorResponse(tlsConn, http.StatusBadRequest, err.Error())
-			continue
+		// Apply tier-based X-Reason enforcement (decision evaluated once at CONNECT time).
+		if decision.Tier == policy.TierDefault {
+			if err := requireReason(req); err != nil {
+				h.logAction(req, "REJECT")
+				writeErrorResponse(tlsConn, http.StatusBadRequest, err.Error())
+				continue
+			}
 		}
 
 		reqBody, err := io.ReadAll(req.Body)

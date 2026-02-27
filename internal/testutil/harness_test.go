@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,9 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/proxy"
 )
 
@@ -32,13 +35,19 @@ func setup(t *testing.T) *Harness {
 		t.Fatalf("ca.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority)
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	handler := proxy.New(store, authority, pol)
 	// Let the proxy trust httptest backends' self-signed certs.
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
 
-	return New(t, store, handler, authority)
+	return New(t, store, handler, authority, pol)
 }
 
 func TestBackendOK(t *testing.T) {
@@ -449,4 +458,242 @@ func rawCONNECT(t *testing.T, proxyHost, targetHost string) net.Conn {
 		t.Fatalf("CONNECT failed: %s", buf[:n])
 	}
 	return conn
+}
+
+// --- Tier integration tests (standalone setups to avoid 127.0.0.1 conflicts) ---
+
+// setupStandalone creates a standalone proxy+backend pair for tier tests.
+func setupStandalone(t *testing.T, backendHandler http.Handler) (*db.Store, *policy.Cache, *http.Client, string) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	handler := proxy.New(store, authority, pol)
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	backend := httptest.NewServer(backendHandler)
+	t.Cleanup(backend.Close)
+
+	proxySrv := httptest.NewServer(handler)
+	t.Cleanup(proxySrv.Close)
+
+	proxyURL, _ := url.Parse(proxySrv.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+		Timeout: 10 * time.Second,
+	}
+
+	return store, pol, client, backend.URL
+}
+
+func TestProxyDenyDomainHTTP(t *testing.T) {
+	store, pol, client, backendURL := setupStandalone(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	u, _ := url.Parse(backendURL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: u.Hostname(), Tier: "deny", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("GET", backendURL+"/test", nil)
+	req.Header.Set("X-Reason", "should be denied")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestProxyAllowDomainHTTP(t *testing.T) {
+	store, pol, client, backendURL := setupStandalone(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("allowed"))
+	}))
+
+	u, _ := url.Parse(backendURL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: u.Hostname(), Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	// No X-Reason — should still succeed.
+	resp, err := client.Get(backendURL + "/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "allowed" {
+		t.Errorf("body = %q, want %q", string(body), "allowed")
+	}
+}
+
+func TestMITMDenyAtConnect(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	handler := proxy.New(store, authority, pol)
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("should not reach"))
+	}))
+	defer backend.Close()
+
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	// Insert deny rule for the backend's hostname.
+	backendURL, _ := url.Parse(backend.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: backendURL.Hostname(), Tier: "deny", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send raw CONNECT and expect 403 before tunnel is established.
+	conn, err := net.Dial("tcp", proxyAddr(t, proxySrv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", backendURL.Host, backendURL.Host)
+	conn.Write([]byte(connectReq))
+
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(buf[:n]), "403") {
+		t.Errorf("expected 403 in CONNECT response, got: %s", buf[:n])
+	}
+}
+
+func TestMITMAllowWithoutReason(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	handler := proxy.New(store, authority, pol)
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("tls-allowed"))
+	}))
+	defer backend.Close()
+
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	// Insert allow rule for the backend's hostname.
+	backendURL, _ := url.Parse(backend.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: backendURL.Hostname(), Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyURL, _ := url.Parse(proxySrv.URL)
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(authority.CertPEM())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		},
+		Timeout: 10 * time.Second,
+	}
+
+	// HTTPS request without X-Reason — should succeed because domain is allowed.
+	resp, err := client.Get(backend.URL + "/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "tls-allowed" {
+		t.Errorf("body = %q, want %q", string(body), "tls-allowed")
+	}
 }
