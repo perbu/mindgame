@@ -16,6 +16,7 @@ import (
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
 	"github.com/perbu/mindgame/internal/policy"
+	"github.com/perbu/mindgame/internal/scoring"
 )
 
 // Hop-by-hop headers that must not be forwarded.
@@ -36,15 +37,18 @@ type Handler struct {
 	store     *db.Store
 	ca        *ca.CA
 	policy    *policy.Cache
+	scorer    *scoring.Engine
 	transport http.RoundTripper
 }
 
-// New creates a proxy handler backed by the given store, certificate authority, and policy cache.
-func New(store *db.Store, authority *ca.CA, pol *policy.Cache) *Handler {
+// New creates a proxy handler backed by the given store, certificate authority,
+// policy cache, and scoring engine.
+func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.Engine) *Handler {
 	return &Handler{
 		store:  store,
 		ca:     authority,
 		policy: pol,
+		scorer: scorer,
 		transport: &http.Transport{
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 			TLSHandshakeTimeout:  10 * time.Second,
@@ -83,7 +87,7 @@ type forwardedResponse struct {
 }
 
 // forwardRequest sends an outbound request and logs it to the audit store.
-func (h *Handler) forwardRequest(r *http.Request, reqBody []byte) (*forwardedResponse, error) {
+func (h *Handler) forwardRequest(r *http.Request, reqBody []byte, sr scoring.Result, action string) (*forwardedResponse, error) {
 	reqHeaders, _ := json.Marshal(r.Header)
 
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), nil)
@@ -126,9 +130,9 @@ func (h *Handler) forwardRequest(r *http.Request, reqBody []byte) (*forwardedRes
 		ReqBody:     string(reqBody),
 		RespStatus:  resp.StatusCode,
 		RespBody:    string(respBody),
-		RiskScore:   0,
-		RiskSignals: "[]",
-		Action:      "ALLOW",
+		RiskScore:   sr.Score,
+		RiskSignals: sr.SignalsJSON(),
+		Action:      action,
 	}
 	if err := h.store.InsertAuditEntry(entry); err != nil {
 		log.Printf("audit log error: %v", err)
@@ -141,10 +145,14 @@ func (h *Handler) forwardRequest(r *http.Request, reqBody []byte) (*forwardedRes
 	}, nil
 }
 
-// logAction logs an audit entry for requests that are denied or rejected
-// (no upstream request made).
-func (h *Handler) logAction(r *http.Request, action string) {
+// logAction logs an audit entry for requests that are denied, rejected, blocked,
+// or banned (no upstream request made). Optional reqBody for BLOCK/BAN forensics.
+func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, reqBody ...[]byte) {
 	reqHeaders, _ := json.Marshal(r.Header)
+	var body string
+	if len(reqBody) > 0 {
+		body = string(reqBody[0])
+	}
 	entry := &db.AuditEntry{
 		Timestamp:   time.Now(),
 		Method:      r.Method,
@@ -152,11 +160,11 @@ func (h *Handler) logAction(r *http.Request, action string) {
 		Host:        r.URL.Hostname(),
 		Reason:      r.Header.Get("X-Reason"),
 		ReqHeaders:  string(reqHeaders),
-		ReqBody:     "",
+		ReqBody:     body,
 		RespStatus:  0,
 		RespBody:    "",
-		RiskScore:   0,
-		RiskSignals: "[]",
+		RiskScore:   sr.Score,
+		RiskSignals: sr.SignalsJSON(),
 		Action:      action,
 	}
 	if err := h.store.InsertAuditEntry(entry); err != nil {
@@ -164,19 +172,40 @@ func (h *Handler) logAction(r *http.Request, action string) {
 	}
 }
 
+// scoreRequest builds RequestVars from the HTTP request and evaluates them.
+func (h *Handler) scoreRequest(r *http.Request, reqBody []byte) scoring.Result {
+	headers := make(map[string]string)
+	for k, v := range r.Header {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+	return h.scorer.Eval(scoring.RequestVars{
+		Method:   r.Method,
+		URL:      r.URL.String(),
+		Host:     r.URL.Hostname(),
+		Path:     r.URL.Path,
+		Body:     string(reqBody),
+		BodySize: len(reqBody),
+		Reason:   r.Header.Get("X-Reason"),
+		Headers:  headers,
+	})
+}
+
 func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	decision := h.policy.Evaluate(r.URL.Hostname())
+	var zeroResult scoring.Result
 
 	switch decision.Tier {
 	case policy.TierDeny:
-		h.logAction(r, "DENY")
+		h.logAction(r, "DENY", zeroResult)
 		http.Error(w, "domain denied by policy", http.StatusForbidden)
 		return
 	case policy.TierAllow:
 		// Skip X-Reason check.
 	default:
 		if err := requireReason(r); err != nil {
-			h.logAction(r, "REJECT")
+			h.logAction(r, "REJECT", zeroResult)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -189,7 +218,35 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body.Close()
 
-	fwd, err := h.forwardRequest(r, reqBody)
+	sr := h.scoreRequest(r, reqBody)
+
+	if decision.Tier == policy.TierDefault {
+		if sr.Score >= 20 {
+			// Ban: insert deny rule and reload policy.
+			if err := h.store.InsertDomainRule(&db.DomainRule{
+				Host:      r.URL.Hostname(),
+				Tier:      "deny",
+				Banned:    true,
+				CreatedAt: time.Now(),
+				Note:      "auto-banned by scoring engine",
+			}); err != nil {
+				log.Printf("failed to insert ban rule: %v", err)
+			}
+			if err := h.policy.Reload(); err != nil {
+				log.Printf("policy reload after ban: %v", err)
+			}
+			h.logAction(r, "BAN", sr, reqBody)
+			http.Error(w, "request banned by scoring engine", http.StatusForbidden)
+			return
+		}
+		if sr.Score >= 10 {
+			h.logAction(r, "BLOCK", sr, reqBody)
+			http.Error(w, "request blocked by scoring engine", http.StatusForbidden)
+			return
+		}
+	}
+
+	fwd, err := h.forwardRequest(r, reqBody, sr, "ALLOW")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -214,6 +271,8 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		hostname = r.Host
 	}
 
+	var zeroResult scoring.Result
+
 	// Check deny before hijacking — we can still use http.Error.
 	decision := h.policy.Evaluate(hostname)
 	if decision.Tier == policy.TierDeny {
@@ -224,7 +283,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			Header: r.Header,
 		}
 		synth.URL.Host = hostname
-		h.logAction(synth, "DENY")
+		h.logAction(synth, "DENY", zeroResult)
 		http.Error(w, "domain denied by policy", http.StatusForbidden)
 		return
 	}
@@ -278,10 +337,17 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		req.URL.Host = targetHost
 		req.RequestURI = ""
 
+		// If host was banned mid-tunnel, deny subsequent requests.
+		if decision.Tier == policy.TierDeny {
+			h.logAction(req, "DENY", zeroResult)
+			writeErrorResponse(tlsConn, http.StatusForbidden, "domain denied by policy")
+			continue
+		}
+
 		// Apply tier-based X-Reason enforcement (decision evaluated once at CONNECT time).
 		if decision.Tier == policy.TierDefault {
 			if err := requireReason(req); err != nil {
-				h.logAction(req, "REJECT")
+				h.logAction(req, "REJECT", zeroResult)
 				writeErrorResponse(tlsConn, http.StatusBadRequest, err.Error())
 				continue
 			}
@@ -294,7 +360,36 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Body.Close()
 
-		fwd, err := h.forwardRequest(req, reqBody)
+		sr := h.scoreRequest(req, reqBody)
+
+		if decision.Tier == policy.TierDefault {
+			if sr.Score >= 20 {
+				// Ban: insert deny rule and reload policy.
+				if err := h.store.InsertDomainRule(&db.DomainRule{
+					Host:      req.URL.Hostname(),
+					Tier:      "deny",
+					Banned:    true,
+					CreatedAt: time.Now(),
+					Note:      "auto-banned by scoring engine",
+				}); err != nil {
+					log.Printf("failed to insert ban rule: %v", err)
+				}
+				if err := h.policy.Reload(); err != nil {
+					log.Printf("policy reload after ban: %v", err)
+				}
+				h.logAction(req, "BAN", sr, reqBody)
+				writeErrorResponse(tlsConn, http.StatusForbidden, "request banned by scoring engine")
+				decision.Tier = policy.TierDeny
+				continue
+			}
+			if sr.Score >= 10 {
+				h.logAction(req, "BLOCK", sr, reqBody)
+				writeErrorResponse(tlsConn, http.StatusForbidden, "request blocked by scoring engine")
+				continue
+			}
+		}
+
+		fwd, err := h.forwardRequest(req, reqBody, sr, "ALLOW")
 		if err != nil {
 			writeErrorResponse(tlsConn, http.StatusBadGateway, err.Error())
 			continue

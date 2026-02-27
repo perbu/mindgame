@@ -7,12 +7,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
 	"github.com/perbu/mindgame/internal/policy"
+	"github.com/perbu/mindgame/internal/scoring"
 )
 
 const testReloadInterval = time.Hour
@@ -37,7 +39,12 @@ func setupTest(t *testing.T) (*Handler, *db.Store, *policy.Cache) {
 	}
 	t.Cleanup(pol.Stop)
 
-	return New(store, authority, pol), store, pol
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	return New(store, authority, pol, scorer), store, pol
 }
 
 func TestHandleHTTPForward(t *testing.T) {
@@ -291,5 +298,237 @@ func TestHandleHTTPDefaultRejectLogged(t *testing.T) {
 	}
 	if entries[0].Action != "REJECT" {
 		t.Errorf("action = %q, want REJECT", entries[0].Action)
+	}
+}
+
+func TestHandleHTTPDefaultTierScoreAllow(t *testing.T) {
+	handler, store, _ := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer origin.Close()
+
+	parsedURL, _ := url.Parse(origin.URL + "/safe")
+	req := httptest.NewRequest("GET", origin.URL+"/safe", nil)
+	req.URL = parsedURL
+	req.RequestURI = origin.URL + "/safe"
+	req.Header.Set("X-Reason", "low risk test")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != "ALLOW" {
+		t.Errorf("action = %q, want ALLOW", e.Action)
+	}
+	if e.RiskScore < 0 {
+		t.Errorf("risk_score = %d, want >= 0", e.RiskScore)
+	}
+}
+
+func TestHandleHTTPDefaultTierScoreBlock(t *testing.T) {
+	handler, store, _ := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	// Trigger confidential_keywords (5) + credential_pattern (8) = 13 → BLOCK
+	body := `{"secret":"password","token":"bearer eyJtoken123","key":"sk-proj1234"}`
+	parsedURL, _ := url.Parse(origin.URL + "/data")
+	req := httptest.NewRequest("POST", origin.URL+"/data", bytes.NewReader([]byte(body)))
+	req.URL = parsedURL
+	req.RequestURI = origin.URL + "/data"
+	req.Header.Set("X-Reason", "test block")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != "BLOCK" {
+		t.Errorf("action = %q, want BLOCK", e.Action)
+	}
+	if e.RiskScore < 10 {
+		t.Errorf("risk_score = %d, want >= 10", e.RiskScore)
+	}
+}
+
+func TestHandleHTTPDefaultTierScoreBan(t *testing.T) {
+	handler, store, pol := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	// Trigger sensitive_path (5) + confidential_keywords (5) + credential_pattern (8) + base64_payload (5) = 23 → BAN
+	b64 := strings.Repeat("ABCD", 100)
+	body := `bearer eyJtoken123 confidential password sk-proj1234 ` + b64
+	parsedURL, _ := url.Parse(origin.URL + "/admin")
+	req := httptest.NewRequest("POST", origin.URL+"/admin", bytes.NewReader([]byte(body)))
+	req.URL = parsedURL
+	req.RequestURI = origin.URL + "/admin"
+	req.Header.Set("X-Reason", "test ban")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != "BAN" {
+		t.Errorf("action = %q, want BAN", e.Action)
+	}
+	if e.RiskScore < 20 {
+		t.Errorf("risk_score = %d, want >= 20", e.RiskScore)
+	}
+
+	// Verify deny rule was inserted with banned=true.
+	_ = pol.Reload()
+	rule, err := store.LookupDomainRule(parsedURL.Hostname())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rule == nil {
+		t.Fatal("expected deny rule to be inserted")
+	}
+	if rule.Tier != "deny" {
+		t.Errorf("rule tier = %q, want deny", rule.Tier)
+	}
+	if !rule.Banned {
+		t.Error("expected banned=true")
+	}
+}
+
+func TestHandleHTTPAllowTierHighScoreForwarded(t *testing.T) {
+	handler, store, pol := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("allowed"))
+	}))
+	defer origin.Close()
+
+	// Mark origin as allow tier.
+	parsedURL, _ := url.Parse(origin.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: parsedURL.Hostname(), Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	// High-score body on allow tier.
+	b64 := strings.Repeat("ABCD", 100)
+	body := `bearer eyJtoken123 confidential password sk-proj1234 ` + b64
+	reqURL, _ := url.Parse(origin.URL + "/admin")
+	req := httptest.NewRequest("POST", origin.URL+"/admin", bytes.NewReader([]byte(body)))
+	req.URL = reqURL
+	req.RequestURI = origin.URL + "/admin"
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// Allow tier → forwarded even with high score.
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != "ALLOW" {
+		t.Errorf("action = %q, want ALLOW", e.Action)
+	}
+	if e.RiskScore < 20 {
+		t.Errorf("risk_score = %d, want >= 20 (recorded for forensics)", e.RiskScore)
+	}
+}
+
+func TestHandleHTTPDenyTierNotScored(t *testing.T) {
+	handler, store, pol := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	parsedURL, _ := url.Parse(origin.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: parsedURL.Hostname(), Tier: "deny", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	reqURL, _ := url.Parse(origin.URL + "/test")
+	req := httptest.NewRequest("GET", origin.URL+"/test", nil)
+	req.URL = reqURL
+	req.RequestURI = origin.URL + "/test"
+	req.Header.Set("X-Reason", "deny test")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != "DENY" {
+		t.Errorf("action = %q, want DENY", e.Action)
+	}
+	if e.RiskScore != 0 {
+		t.Errorf("risk_score = %d, want 0 (denied before scoring)", e.RiskScore)
 	}
 }

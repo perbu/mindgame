@@ -189,6 +189,99 @@ func TestInsertDomainRulesBatch(t *testing.T) {
 	}
 }
 
+func TestInsertAndListScoringRules(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	rules := []ScoringRule{
+		{Name: "rule_c", Expr: `method == "GET"`, Points: 3, Enabled: true, Note: "get check"},
+		{Name: "rule_a", Expr: `body_size > 100`, Points: 5, Enabled: false, Note: ""},
+		{Name: "rule_b", Expr: `host == "evil.com"`, Points: 10, Enabled: true, Note: "evil"},
+	}
+	if err := store.InsertScoringRules(rules); err != nil {
+		t.Fatalf("InsertScoringRules: %v", err)
+	}
+
+	got, err := store.ListScoringRules()
+	if err != nil {
+		t.Fatalf("ListScoringRules: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(got))
+	}
+	// Ordered by name.
+	if got[0].Name != "rule_a" {
+		t.Errorf("first name = %q, want %q", got[0].Name, "rule_a")
+	}
+	if got[1].Name != "rule_b" {
+		t.Errorf("second name = %q, want %q", got[1].Name, "rule_b")
+	}
+	if got[2].Name != "rule_c" {
+		t.Errorf("third name = %q, want %q", got[2].Name, "rule_c")
+	}
+	// Verify fields on one rule.
+	if got[2].Points != 3 {
+		t.Errorf("rule_c points = %d, want 3", got[2].Points)
+	}
+	if !got[2].Enabled {
+		t.Error("rule_c should be enabled")
+	}
+	if got[2].Note != "get check" {
+		t.Errorf("rule_c note = %q, want %q", got[2].Note, "get check")
+	}
+
+	count, err := store.CountScoringRules()
+	if err != nil {
+		t.Fatalf("CountScoringRules: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("count = %d, want 3", count)
+	}
+}
+
+func TestCountScoringRulesEmpty(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	count, err := store.CountScoringRules()
+	if err != nil {
+		t.Fatalf("CountScoringRules: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+func TestCountScoringRulesAfterInsert(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	rules := []ScoringRule{
+		{Name: "r1", Expr: `true`, Points: 1, Enabled: true},
+		{Name: "r2", Expr: `false`, Points: 2, Enabled: true},
+	}
+	if err := store.InsertScoringRules(rules); err != nil {
+		t.Fatalf("InsertScoringRules: %v", err)
+	}
+
+	count, err := store.CountScoringRules()
+	if err != nil {
+		t.Fatalf("CountScoringRules: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
+	}
+}
+
 func TestListDomainRules(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

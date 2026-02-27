@@ -19,6 +19,7 @@ import (
 	"github.com/perbu/mindgame/internal/db"
 	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/proxy"
+	"github.com/perbu/mindgame/internal/scoring"
 )
 
 func setup(t *testing.T) *Harness {
@@ -41,7 +42,12 @@ func setup(t *testing.T) *Harness {
 	}
 	t.Cleanup(pol.Stop)
 
-	handler := proxy.New(store, authority, pol)
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer)
 	// Let the proxy trust httptest backends' self-signed certs.
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -483,7 +489,12 @@ func setupStandalone(t *testing.T, backendHandler http.Handler) (*db.Store, *pol
 	}
 	t.Cleanup(pol.Stop)
 
-	handler := proxy.New(store, authority, pol)
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer)
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -584,7 +595,12 @@ func TestMITMDenyAtConnect(t *testing.T) {
 	}
 	t.Cleanup(pol.Stop)
 
-	handler := proxy.New(store, authority, pol)
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer)
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -647,7 +663,12 @@ func TestMITMAllowWithoutReason(t *testing.T) {
 	}
 	t.Cleanup(pol.Stop)
 
-	handler := proxy.New(store, authority, pol)
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer)
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -695,5 +716,113 @@ func TestMITMAllowWithoutReason(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "tls-allowed" {
 		t.Errorf("body = %q, want %q", string(body), "tls-allowed")
+	}
+}
+
+// --- Scoring integration tests ---
+
+func TestScoringEnvPath(t *testing.T) {
+	h := setup(t)
+	client := h.Client()
+
+	// Request to /.env path (default tier) should trigger sensitive_path.
+	req, _ := http.NewRequest("GET", h.BackendURL("env")+"/.env", nil)
+	req.Header.Set("X-Reason", "scoring env test")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET /.env: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Score 5 → still forwarded (< 10).
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	entries, err := h.store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.RiskScore < 5 {
+		t.Errorf("risk_score = %d, want >= 5", e.RiskScore)
+	}
+	if !strings.Contains(e.RiskSignals, "sensitive_path") {
+		t.Errorf("risk_signals = %q, want to contain sensitive_path", e.RiskSignals)
+	}
+}
+
+func TestScoringCredentialExfiltration(t *testing.T) {
+	h := setup(t)
+	client := h.Client()
+
+	// POST with credential patterns should trigger high score and be blocked.
+	body := `{"token":"bearer eyJhbGciOiJIUzI1NiJ9","key":"sk-proj12345","secret":"password","aws":"AKIAIOSFODNN7"}`
+	req, _ := http.NewRequest("POST", h.BackendURL("exfiltrate")+"/data", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Reason", "exfil test")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST exfiltrate: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Should be blocked or banned (score >= 10).
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+
+	entries, err := h.store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) < 1 {
+		t.Fatal("expected at least 1 audit entry")
+	}
+	e := entries[0]
+	if e.RiskScore < 10 {
+		t.Errorf("risk_score = %d, want >= 10", e.RiskScore)
+	}
+	if e.Action != "BLOCK" && e.Action != "BAN" {
+		t.Errorf("action = %q, want BLOCK or BAN", e.Action)
+	}
+}
+
+func TestScoringLargePost(t *testing.T) {
+	h := setup(t)
+	client := h.Client()
+
+	// POST >64KB to trigger large_outbound.
+	body := strings.Repeat("x", 70000)
+	req, _ := http.NewRequest("POST", h.BackendURL("echo")+"/upload", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Reason", "large post test")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST large: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Score 3 → still forwarded (< 10).
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	entries, err := h.store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.RiskScore < 3 {
+		t.Errorf("risk_score = %d, want >= 3", e.RiskScore)
+	}
+	if !strings.Contains(e.RiskSignals, "large_outbound") {
+		t.Errorf("risk_signals = %q, want to contain large_outbound", e.RiskSignals)
 	}
 }

@@ -182,6 +182,63 @@ func (s *Store) InsertDomainRule(r *DomainRule) error {
 	return err
 }
 
+// ScoringRule represents a row in the scoring_rules table.
+type ScoringRule struct {
+	Name    string
+	Expr    string
+	Points  int
+	Enabled bool
+	Note    string
+}
+
+// ListScoringRules returns all scoring rules ordered by name.
+func (s *Store) ListScoringRules() ([]ScoringRule, error) {
+	rows, err := s.db.Query(`SELECT name, expr, points, enabled, note FROM scoring_rules ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []ScoringRule
+	for rows.Next() {
+		var r ScoringRule
+		if err := rows.Scan(&r.Name, &r.Expr, &r.Points, &r.Enabled, &r.Note); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// CountScoringRules returns the number of rows in the scoring_rules table.
+func (s *Store) CountScoringRules() (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM scoring_rules`).Scan(&count)
+	return count, err
+}
+
+// InsertScoringRules batch-inserts scoring rules in a single transaction.
+func (s *Store) InsertScoringRules(rules []ScoringRule) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO scoring_rules (name, expr, points, enabled, note) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range rules {
+		if _, err := stmt.Exec(r.Name, r.Expr, r.Points, r.Enabled, r.Note); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // InsertDomainRules batch-upserts domain rules in a single transaction.
 func (s *Store) InsertDomainRules(rules []DomainRule) error {
 	tx, err := s.db.Begin()

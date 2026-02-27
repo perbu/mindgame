@@ -15,6 +15,7 @@ import (
 	"github.com/perbu/mindgame/internal/db"
 	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/proxy"
+	"github.com/perbu/mindgame/internal/scoring"
 )
 
 func main() {
@@ -55,7 +56,28 @@ func main() {
 	}
 	defer pol.Stop()
 
-	handler := proxy.New(store, authority, pol)
+	count, err := store.CountScoringRules()
+	if err != nil {
+		log.Fatalf("failed to count scoring rules: %v", err)
+	}
+	if count == 0 {
+		if err := store.InsertScoringRules(scoring.DefaultRules()); err != nil {
+			log.Fatalf("failed to seed scoring rules: %v", err)
+		}
+		log.Printf("seeded %d default scoring rules", len(scoring.DefaultRules()))
+	}
+
+	rules, err := store.ListScoringRules()
+	if err != nil {
+		log.Fatalf("failed to list scoring rules: %v", err)
+	}
+	scorer, err := scoring.New(rules)
+	if err != nil {
+		log.Fatalf("failed to create scoring engine: %v", err)
+	}
+	log.Printf("scoring engine loaded with %d rules", scorer.RuleCount())
+
+	handler := proxy.New(store, authority, pol, scorer)
 
 	srv := &http.Server{
 		Addr:    *addr,
