@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
 	"github.com/perbu/mindgame/internal/proxy"
 )
@@ -17,6 +19,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "audit.db", "path to SQLite database")
+	caDir := flag.String("ca-dir", ".", "directory for CA certificate and key")
 	flag.Parse()
 
 	store, err := db.Open(*dbPath)
@@ -25,7 +28,15 @@ func main() {
 	}
 	defer store.Close()
 
-	handler := proxy.New(store)
+	certPath := filepath.Join(*caDir, "ca.pem")
+	keyPath := filepath.Join(*caDir, "ca.key")
+	authority, err := ca.New(certPath, keyPath)
+	if err != nil {
+		log.Fatalf("failed to initialize CA: %v", err)
+	}
+	log.Printf("CA cert: %s, key: %s", certPath, keyPath)
+
+	handler := proxy.New(store, authority)
 
 	srv := &http.Server{
 		Addr:    *addr,

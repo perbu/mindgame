@@ -1,6 +1,8 @@
 package testutil
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
 )
 
@@ -19,18 +22,20 @@ import (
 type Harness struct {
 	t        *testing.T
 	store    *db.Store
+	ca       *ca.CA
 	proxy    *httptest.Server
 	backends map[string]*httptest.Server
 }
 
 // New creates a Harness with all pre-defined backends and a proxy server
 // wrapping the given handler. All servers are cleaned up via t.Cleanup.
-func New(t *testing.T, store *db.Store, proxyHandler http.Handler) *Harness {
+func New(t *testing.T, store *db.Store, proxyHandler http.Handler, authority *ca.CA) *Harness {
 	t.Helper()
 
 	h := &Harness{
 		t:        t,
 		store:    store,
+		ca:       authority,
 		backends: make(map[string]*httptest.Server),
 	}
 
@@ -75,6 +80,30 @@ func (h *Harness) Client() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
+		},
+		Timeout: 10 * time.Second,
+	}
+}
+
+// TLSClient returns an *http.Client that trusts the proxy CA and routes
+// HTTPS requests through the proxy via CONNECT tunneling.
+func (h *Harness) TLSClient() *http.Client {
+	proxyURL, err := url.Parse(h.proxy.URL)
+	if err != nil {
+		h.t.Fatalf("parse proxy URL: %v", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(h.ca.CertPEM()) {
+		h.t.Fatal("failed to add CA cert to pool")
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				RootCAs: pool,
+			},
 		},
 		Timeout: 10 * time.Second,
 	}

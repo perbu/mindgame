@@ -9,17 +9,25 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
 )
 
 func setupTest(t *testing.T) (*Handler, *db.Store) {
 	t.Helper()
-	store, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	return New(store), store
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	return New(store, authority), store
 }
 
 func TestHandleHTTPForward(t *testing.T) {
@@ -94,6 +102,7 @@ func TestHandleHTTPForwardWithBody(t *testing.T) {
 	req := httptest.NewRequest("POST", origin.URL+"/post", bytes.NewReader([]byte("payload")))
 	req.URL = parsedURL
 	req.RequestURI = origin.URL + "/post"
+	req.Header.Set("X-Reason", "test post")
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -120,11 +129,38 @@ func TestHopByHopHeadersStripped(t *testing.T) {
 	req.RequestURI = origin.URL + "/test"
 	req.Header.Set("Proxy-Authorization", "Basic secret")
 	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("X-Reason", "test hop-by-hop")
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if gotProxyAuth != "" {
 		t.Errorf("Proxy-Authorization was forwarded: %q", gotProxyAuth)
+	}
+}
+
+func TestHandleHTTPRequiresXReason(t *testing.T) {
+	handler, _ := setupTest(t)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	parsedURL, _ := url.Parse(origin.URL + "/test")
+	req := httptest.NewRequest("GET", origin.URL+"/test", nil)
+	req.URL = parsedURL
+	req.RequestURI = origin.URL + "/test"
+	// No X-Reason header set.
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	body, _ := io.ReadAll(rec.Result().Body)
+	if !bytes.Contains(body, []byte("X-Reason")) {
+		t.Errorf("body = %q, want mention of X-Reason", string(body))
 	}
 }

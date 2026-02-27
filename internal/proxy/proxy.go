@@ -1,13 +1,19 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"time"
 
+	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
 )
 
@@ -27,19 +33,27 @@ var hopByHopHeaders = []string{
 // Handler is an HTTP forward proxy that logs all requests to the audit store.
 type Handler struct {
 	store     *db.Store
+	ca        *ca.CA
 	transport http.RoundTripper
 }
 
-// New creates a proxy handler backed by the given store.
-func New(store *db.Store) *Handler {
+// New creates a proxy handler backed by the given store and certificate authority.
+func New(store *db.Store, authority *ca.CA) *Handler {
 	return &Handler{
 		store: store,
+		ca:    authority,
 		transport: &http.Transport{
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 			TLSHandshakeTimeout:  10 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 		},
 	}
+}
+
+// SetTransport overrides the default transport. Useful for tests that need
+// InsecureSkipVerify or custom dialing.
+func (h *Handler) SetTransport(rt http.RoundTripper) {
+	h.transport = rt
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,26 +64,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	// Buffer request body.
-	reqBody, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read request body", http.StatusBadGateway)
-		return
+// requireReason returns an error if the X-Reason header is missing or empty.
+func requireReason(r *http.Request) error {
+	if r.Header.Get("X-Reason") == "" {
+		return errors.New("X-Reason header is required")
 	}
-	r.Body.Close()
+	return nil
+}
 
-	// Marshal request headers for logging.
+// forwardedResponse holds the buffered result of an upstream round-trip.
+type forwardedResponse struct {
+	statusCode int
+	header     http.Header
+	body       []byte
+}
+
+// forwardRequest sends an outbound request and logs it to the audit store.
+func (h *Handler) forwardRequest(r *http.Request, reqBody []byte) (*forwardedResponse, error) {
 	reqHeaders, _ := json.Marshal(r.Header)
 
-	// Build outbound request.
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), nil)
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
+		return nil, fmt.Errorf("bad request: %w", err)
 	}
 
-	// Copy headers, then strip hop-by-hop.
 	for key, vals := range r.Header {
 		for _, v := range vals {
 			outReq.Header.Add(key, v)
@@ -79,28 +97,22 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		outReq.Header.Del(h)
 	}
 
-	// Attach body if present.
 	if len(reqBody) > 0 {
-		outReq.Body = io.NopCloser(io.NewSectionReader(newBytesReaderAt(reqBody), 0, int64(len(reqBody))))
+		outReq.Body = io.NopCloser(bytes.NewReader(reqBody))
 		outReq.ContentLength = int64(len(reqBody))
 	}
 
-	// Execute request.
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
-		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("upstream error: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Buffer response body.
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		http.Error(w, "failed to read response body", http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Log to audit store.
 	entry := &db.AuditEntry{
 		Timestamp:   time.Now(),
 		Method:      r.Method,
@@ -119,94 +131,156 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("audit log error: %v", err)
 	}
 
-	// Write response back to client.
-	for key, vals := range resp.Header {
+	return &forwardedResponse{
+		statusCode: resp.StatusCode,
+		header:     resp.Header,
+		body:       respBody,
+	}, nil
+}
+
+func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := requireReason(r); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	reqBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadGateway)
+		return
+	}
+	r.Body.Close()
+
+	fwd, err := h.forwardRequest(r, reqBody)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	for key, vals := range fwd.header {
 		for _, v := range vals {
 			w.Header().Add(key, v)
 		}
 	}
-	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody)
+	w.WriteHeader(fwd.statusCode)
+	w.Write(fwd.body)
 }
 
 func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
-	// Dial the target.
-	targetConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+	// Keep the full host:port for outbound requests.
+	targetHost := r.Host
+
+	// Extract hostname (without port) for cert minting.
+	hostname, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
-		http.Error(w, "failed to connect to target", http.StatusBadGateway)
-		return
+		hostname = r.Host
 	}
 
-	// Hijack the client connection.
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
-		targetConn.Close()
 		return
 	}
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, "hijack failed", http.StatusInternalServerError)
-		targetConn.Close()
 		return
 	}
 
-	// Send 200 Connection Established.
+	// Tell the client the tunnel is open.
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
-	// Log the CONNECT.
-	entry := &db.AuditEntry{
-		Timestamp:   time.Now(),
-		Method:      "CONNECT",
-		URL:         "https://" + r.Host,
-		Host:        r.Host,
-		Reason:      r.Header.Get("X-Reason"),
-		ReqHeaders:  "{}",
-		ReqBody:     "",
-		RespStatus:  200,
-		RespBody:    "",
-		RiskScore:   0,
-		RiskSignals: "[]",
-		Action:      "ALLOW",
+	// Wrap the raw connection in a TLS server using our CA.
+	// Use a custom GetCertificate that falls back to the known hostname
+	// when SNI is empty (e.g., IP-based connections).
+	tlsConfig := &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			name := hello.ServerName
+			if name == "" {
+				name = hostname
+			}
+			return h.ca.MintCertificate(name)
+		},
 	}
-	if err := h.store.InsertAuditEntry(entry); err != nil {
-		log.Printf("audit log error: %v", err)
+	tlsConn := tls.Server(clientConn, tlsConfig)
+	if err := tlsConn.Handshake(); err != nil {
+		log.Printf("MITM TLS handshake failed for %s: %v", hostname, err)
+		clientConn.Close()
+		return
 	}
+	defer tlsConn.Close()
 
-	// Bidirectional copy.
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(targetConn, clientConn)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(clientConn, targetConn)
-		done <- struct{}{}
-	}()
+	// Read HTTP requests from the decrypted connection.
+	reader := bufio.NewReader(tlsConn)
+	for {
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !isConnClosed(err) {
+				log.Printf("MITM read request error for %s: %v", hostname, err)
+			}
+			return
+		}
 
-	// Wait for one direction to finish, then clean up.
-	<-done
-	clientConn.Close()
-	targetConn.Close()
-	<-done
+		req.URL.Scheme = "https"
+		req.URL.Host = targetHost
+		req.RequestURI = ""
+
+		if err := requireReason(req); err != nil {
+			writeErrorResponse(tlsConn, http.StatusBadRequest, err.Error())
+			continue
+		}
+
+		reqBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			writeErrorResponse(tlsConn, http.StatusBadGateway, "failed to read request body")
+			continue
+		}
+		req.Body.Close()
+
+		fwd, err := h.forwardRequest(req, reqBody)
+		if err != nil {
+			writeErrorResponse(tlsConn, http.StatusBadGateway, err.Error())
+			continue
+		}
+
+		writeResponse(tlsConn, fwd)
+	}
 }
 
-// bytesReaderAt wraps a byte slice to implement io.ReaderAt.
-type bytesReaderAt struct {
-	data []byte
+// writeErrorResponse writes a minimal HTTP error response to a raw connection.
+func writeErrorResponse(conn net.Conn, code int, msg string) {
+	resp := &http.Response{
+		StatusCode: code,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewBufferString(msg + "\n")),
+	}
+	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	resp.Write(conn)
 }
 
-func newBytesReaderAt(data []byte) *bytesReaderAt {
-	return &bytesReaderAt{data: data}
+// writeResponse writes a forwarded response as an HTTP response to a raw connection.
+func writeResponse(conn net.Conn, fwd *forwardedResponse) {
+	resp := &http.Response{
+		StatusCode: fwd.statusCode,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     fwd.header,
+		Body:       io.NopCloser(bytes.NewReader(fwd.body)),
+	}
+	resp.ContentLength = int64(len(fwd.body))
+	resp.Write(conn)
 }
 
-func (b *bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	if off >= int64(len(b.data)) {
-		return 0, io.EOF
+// isConnClosed checks whether an error indicates the connection was closed.
+func isConnClosed(err error) bool {
+	if err == nil {
+		return false
 	}
-	n := copy(p, b.data[off:])
-	if n < len(p) {
-		return n, io.EOF
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
 	}
-	return n, nil
+	return false
 }

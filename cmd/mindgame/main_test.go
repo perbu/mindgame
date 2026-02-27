@@ -1,14 +1,16 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"testing"
 
+	"github.com/perbu/mindgame/internal/ca"
 	"github.com/perbu/mindgame/internal/db"
 	"github.com/perbu/mindgame/internal/proxy"
 )
@@ -22,14 +24,20 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	// 2. Open temp DB and create proxy.
-	store, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	// 2. Open temp DB and create proxy with CA.
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer store.Close()
 
-	handler := proxy.New(store)
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	handler := proxy.New(store, authority)
 
 	// 3. Start proxy on a random port.
 	proxyServer := httptest.NewServer(handler)
@@ -44,7 +52,9 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 	}
 
 	// 5. Make request through the proxy to the origin.
-	resp, err := client.Get(origin.URL + "/hello")
+	req, _ := http.NewRequest("GET", origin.URL+"/hello", nil)
+	req.Header.Set("X-Reason", "integration test")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET through proxy: %v", err)
 	}
@@ -85,76 +95,65 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 }
 
 func TestIntegrationCONNECT(t *testing.T) {
-	// Origin: a plain TCP server that echoes data.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	defer listener.Close()
+	// TLS backend that the proxy will MITM.
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("tls-intercepted"))
+	}))
+	defer backend.Close()
 
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				io.Copy(c, c) // echo
-			}(conn)
-		}
-	}()
-
-	targetAddr := listener.Addr().String()
-
-	// Open temp DB and create proxy.
-	store, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	// Open temp DB and create proxy with CA.
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer store.Close()
 
-	handler := proxy.New(store)
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	handler := proxy.New(store, authority)
+	// Let the proxy trust the httptest backend's self-signed cert.
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
 	proxyServer := httptest.NewServer(handler)
 	defer proxyServer.Close()
 
-	// Connect to the proxy and send a CONNECT request manually.
+	// Build a client that trusts the proxy CA.
 	proxyURL, _ := url.Parse(proxyServer.URL)
-	conn, err := net.Dial("tcp", proxyURL.Host)
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(authority.CertPEM())
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		},
+	}
+
+	// Make HTTPS request through the proxy.
+	req, _ := http.NewRequest("GET", backend.URL+"/secret", nil)
+	req.Header.Set("X-Reason", "connect integration test")
+	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
+		t.Fatalf("HTTPS through proxy: %v", err)
 	}
-	defer conn.Close()
+	defer resp.Body.Close()
 
-	// Send CONNECT.
-	connectReq := "CONNECT " + targetAddr + " HTTP/1.1\r\nHost: " + targetAddr + "\r\n\r\n"
-	conn.Write([]byte(connectReq))
-
-	// Read response (should be 200).
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("read CONNECT response: %v", err)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-	response := string(buf[:n])
-	if response != "HTTP/1.1 200 Connection Established\r\n\r\n" {
-		t.Fatalf("unexpected CONNECT response: %q", response)
+	if string(body) != "tls-intercepted" {
+		t.Errorf("body = %q, want %q", string(body), "tls-intercepted")
 	}
 
-	// Now the tunnel is open. Send data through it.
-	conn.Write([]byte("hello tunnel"))
-	n, err = conn.Read(buf)
-	if err != nil {
-		t.Fatalf("read echo: %v", err)
-	}
-	if string(buf[:n]) != "hello tunnel" {
-		t.Errorf("echo = %q, want %q", string(buf[:n]), "hello tunnel")
-	}
-
-	// Close and verify audit entry.
-	conn.Close()
-
-	// Give goroutines a moment to finish.
+	// Verify the decrypted traffic was logged.
 	entries, err := store.ListAuditEntries(10)
 	if err != nil {
 		t.Fatalf("ListAuditEntries: %v", err)
@@ -162,7 +161,14 @@ func TestIntegrationCONNECT(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 audit entry, got %d", len(entries))
 	}
-	if entries[0].Method != "CONNECT" {
-		t.Errorf("audit method = %q, want CONNECT", entries[0].Method)
+	e := entries[0]
+	if e.Method != "GET" {
+		t.Errorf("audit method = %q, want GET", e.Method)
+	}
+	if e.RespBody != "tls-intercepted" {
+		t.Errorf("audit resp_body = %q, want %q", e.RespBody, "tls-intercepted")
+	}
+	if e.Reason != "connect integration test" {
+		t.Errorf("audit reason = %q, want %q", e.Reason, "connect integration test")
 	}
 }
