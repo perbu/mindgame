@@ -2,6 +2,9 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -262,4 +265,333 @@ func (s *Store) InsertDomainRules(rules []DomainRule) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// UpdateDomainRule updates an existing domain rule.
+func (s *Store) UpdateDomainRule(host, tier string, banned bool, note string) error {
+	res, err := s.db.Exec(`UPDATE domain_rules SET tier=?, banned=?, note=? WHERE host=?`,
+		tier, banned, note, host)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("domain rule %q not found", host)
+	}
+	return nil
+}
+
+// DeleteDomainRule deletes a domain rule by host.
+func (s *Store) DeleteDomainRule(host string) error {
+	res, err := s.db.Exec(`DELETE FROM domain_rules WHERE host=?`, host)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("domain rule %q not found", host)
+	}
+	return nil
+}
+
+// ListDomainRulesFiltered returns domain rules matching the host filter, with banned rules sorted to top.
+func (s *Store) ListDomainRulesFiltered(hostFilter string) ([]DomainRule, error) {
+	query := `SELECT host, tier, banned, created_at, note FROM domain_rules`
+	var args []any
+	if hostFilter != "" {
+		query += ` WHERE host LIKE ?`
+		args = append(args, "%"+hostFilter+"%")
+	}
+	query += ` ORDER BY banned DESC, host`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []DomainRule
+	for rows.Next() {
+		var r DomainRule
+		if err := rows.Scan(&r.Host, &r.Tier, &r.Banned, &r.CreatedAt, &r.Note); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// InsertScoringRule inserts a single scoring rule.
+func (s *Store) InsertScoringRule(r *ScoringRule) error {
+	_, err := s.db.Exec(`INSERT INTO scoring_rules (name, expr, points, enabled, note) VALUES (?, ?, ?, ?, ?)`,
+		r.Name, r.Expr, r.Points, r.Enabled, r.Note)
+	return err
+}
+
+// UpdateScoringRule updates an existing scoring rule.
+func (s *Store) UpdateScoringRule(name, expr string, points int, enabled bool, note string) error {
+	res, err := s.db.Exec(`UPDATE scoring_rules SET expr=?, points=?, enabled=?, note=? WHERE name=?`,
+		expr, points, enabled, note, name)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("scoring rule %q not found", name)
+	}
+	return nil
+}
+
+// DeleteScoringRule deletes a scoring rule by name.
+func (s *Store) DeleteScoringRule(name string) error {
+	res, err := s.db.Exec(`DELETE FROM scoring_rules WHERE name=?`, name)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("scoring rule %q not found", name)
+	}
+	return nil
+}
+
+// GetAuditEntry returns a single audit entry by ID, or (nil, nil) if not found.
+func (s *Store) GetAuditEntry(id int64) (*AuditEntry, error) {
+	var e AuditEntry
+	err := s.db.QueryRow(`
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action
+		FROM audit_log WHERE id = ?`, id).
+		Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
+			&e.ReqHeaders, &e.ReqBody, &e.RespStatus, &e.RespBody,
+			&e.RiskScore, &e.RiskSignals, &e.Action)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// AuditFilter specifies criteria for filtering audit log entries.
+type AuditFilter struct {
+	Action   string
+	Host     string
+	MinScore int
+	After    time.Time
+	Before   time.Time
+	Limit    int
+	AfterID  int64
+}
+
+// ListAuditEntriesFiltered returns audit entries matching the given filter.
+func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
+	var clauses []string
+	var args []any
+
+	if f.Action != "" {
+		clauses = append(clauses, "action = ?")
+		args = append(args, f.Action)
+	}
+	if f.Host != "" {
+		clauses = append(clauses, "host LIKE ?")
+		args = append(args, "%"+f.Host+"%")
+	}
+	if f.MinScore > 0 {
+		clauses = append(clauses, "risk_score >= ?")
+		args = append(args, f.MinScore)
+	}
+	if !f.After.IsZero() {
+		clauses = append(clauses, "timestamp > ?")
+		args = append(args, f.After)
+	}
+	if !f.Before.IsZero() {
+		clauses = append(clauses, "timestamp < ?")
+		args = append(args, f.Before)
+	}
+	if f.AfterID > 0 {
+		clauses = append(clauses, "id < ?")
+		args = append(args, f.AfterID)
+	}
+
+	query := `SELECT id, timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action FROM audit_log`
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY id DESC"
+
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query += " LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
+			&e.ReqHeaders, &e.ReqBody, &e.RespStatus, &e.RespBody,
+			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// HostCount holds a host and its request count.
+type HostCount struct {
+	Host  string
+	Count int
+}
+
+// HostAvgScore holds a host, its average risk score, and request count.
+type HostAvgScore struct {
+	Host     string
+	AvgScore float64
+	Count    int
+}
+
+// RuleHitCount holds a rule name and how many times it was triggered.
+type RuleHitCount struct {
+	RuleName string
+	Count    int
+}
+
+// AuditStats holds aggregated audit log statistics.
+type AuditStats struct {
+	TotalLastMinute  int
+	ByAction         map[string]int
+	TopHosts         []HostCount
+	TopRiskHosts     []HostAvgScore
+	RecentBans       []AuditEntry
+	RuleHitFrequency []RuleHitCount
+}
+
+// GetAuditStats returns aggregated audit statistics for the given time window.
+func (s *Store) GetAuditStats(window time.Duration) (*AuditStats, error) {
+	cutoff := time.Now().Add(-window)
+	stats := &AuditStats{
+		ByAction: make(map[string]int),
+	}
+
+	// Total requests in window.
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM audit_log WHERE timestamp > ?`, cutoff).Scan(&stats.TotalLastMinute)
+	if err != nil {
+		return nil, err
+	}
+
+	// By action.
+	rows, err := s.db.Query(`SELECT action, COUNT(*) FROM audit_log WHERE timestamp > ? GROUP BY action`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var action string
+		var count int
+		if err := rows.Scan(&action, &count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stats.ByAction[action] = count
+	}
+	rows.Close()
+
+	// Top hosts by count.
+	rows, err = s.db.Query(`SELECT host, COUNT(*) as cnt FROM audit_log WHERE timestamp > ? GROUP BY host ORDER BY cnt DESC LIMIT 10`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var hc HostCount
+		if err := rows.Scan(&hc.Host, &hc.Count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stats.TopHosts = append(stats.TopHosts, hc)
+	}
+	rows.Close()
+
+	// Top risk hosts by average score.
+	rows, err = s.db.Query(`SELECT host, AVG(risk_score) as avg_score, COUNT(*) as cnt FROM audit_log WHERE timestamp > ? AND risk_score > 0 GROUP BY host ORDER BY avg_score DESC LIMIT 10`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var ha HostAvgScore
+		if err := rows.Scan(&ha.Host, &ha.AvgScore, &ha.Count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stats.TopRiskHosts = append(stats.TopRiskHosts, ha)
+	}
+	rows.Close()
+
+	// Recent bans.
+	rows, err = s.db.Query(`
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action
+		FROM audit_log WHERE timestamp > ? AND action = 'BAN' ORDER BY id DESC LIMIT 10`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
+			&e.ReqHeaders, &e.ReqBody, &e.RespStatus, &e.RespBody,
+			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stats.RecentBans = append(stats.RecentBans, e)
+	}
+	rows.Close()
+
+	// Rule hit frequency using json_each.
+	rows, err = s.db.Query(`
+		SELECT j.value AS rule_name, COUNT(*) AS cnt
+		FROM audit_log, json_each(audit_log.risk_signals) AS j
+		WHERE audit_log.timestamp > ?
+		GROUP BY j.value ORDER BY cnt DESC LIMIT 20`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var rh RuleHitCount
+		if err := rows.Scan(&rh.RuleName, &rh.Count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		// json_each returns JSON strings with quotes — strip them.
+		rh.RuleName = strings.Trim(rh.RuleName, `"`)
+		stats.RuleHitFrequency = append(stats.RuleHitFrequency, rh)
+	}
+	rows.Close()
+
+	return stats, nil
+}
+
+// ParseSignals parses a JSON array of signal names from an audit entry's risk_signals field.
+func ParseSignals(signalsJSON string) []string {
+	var signals []string
+	_ = json.Unmarshal([]byte(signalsJSON), &signals)
+	return signals
 }

@@ -317,3 +317,367 @@ func TestListDomainRules(t *testing.T) {
 		t.Errorf("third host = %q, want %q", all[2].Host, "z.com")
 	}
 }
+
+func TestUpdateDomainRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().Truncate(time.Second)
+	if err := store.InsertDomainRule(&DomainRule{Host: "example.com", Tier: "allow", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.UpdateDomainRule("example.com", "deny", true, "banned now"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.LookupDomainRule("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tier != "deny" {
+		t.Errorf("tier = %q, want deny", got.Tier)
+	}
+	if !got.Banned {
+		t.Error("expected banned=true")
+	}
+	if got.Note != "banned now" {
+		t.Errorf("note = %q, want %q", got.Note, "banned now")
+	}
+}
+
+func TestUpdateDomainRuleNotFound(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpdateDomainRule("nonexistent.com", "allow", false, ""); err == nil {
+		t.Error("expected error for nonexistent rule")
+	}
+}
+
+func TestDeleteDomainRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().Truncate(time.Second)
+	if err := store.InsertDomainRule(&DomainRule{Host: "example.com", Tier: "allow", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteDomainRule("example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.LookupDomainRule("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("expected nil after delete, got %+v", got)
+	}
+}
+
+func TestDeleteDomainRuleNotFound(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.DeleteDomainRule("nonexistent.com"); err == nil {
+		t.Error("expected error for nonexistent rule")
+	}
+}
+
+func TestListDomainRulesFiltered(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().Truncate(time.Second)
+	rules := []DomainRule{
+		{Host: "example.com", Tier: "allow", CreatedAt: now},
+		{Host: "evil.com", Tier: "deny", Banned: true, CreatedAt: now},
+		{Host: "test.example.com", Tier: "allow", CreatedAt: now},
+	}
+	if err := store.InsertDomainRules(rules); err != nil {
+		t.Fatal(err)
+	}
+
+	// Filter by "example" should return 2 rules.
+	got, err := store.ListDomainRulesFiltered("example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(got))
+	}
+
+	// Empty filter should return all, banned first.
+	got, err = store.ListDomainRulesFiltered("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(got))
+	}
+	if got[0].Host != "evil.com" {
+		t.Errorf("first host = %q, want evil.com (banned first)", got[0].Host)
+	}
+}
+
+func TestInsertScoringRuleSingle(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	r := &ScoringRule{Name: "test_rule", Expr: `method == "GET"`, Points: 5, Enabled: true, Note: "test"}
+	if err := store.InsertScoringRule(r); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := store.ListScoringRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].Name != "test_rule" {
+		t.Errorf("name = %q, want test_rule", rules[0].Name)
+	}
+}
+
+func TestUpdateScoringRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.InsertScoringRule(&ScoringRule{Name: "r1", Expr: "true", Points: 1, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.UpdateScoringRule("r1", "false", 10, false, "updated"); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := store.ListScoringRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules[0].Expr != "false" {
+		t.Errorf("expr = %q, want false", rules[0].Expr)
+	}
+	if rules[0].Points != 10 {
+		t.Errorf("points = %d, want 10", rules[0].Points)
+	}
+	if rules[0].Enabled {
+		t.Error("expected enabled=false")
+	}
+	if rules[0].Note != "updated" {
+		t.Errorf("note = %q, want updated", rules[0].Note)
+	}
+}
+
+func TestUpdateScoringRuleNotFound(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpdateScoringRule("nonexistent", "true", 1, true, ""); err == nil {
+		t.Error("expected error for nonexistent rule")
+	}
+}
+
+func TestDeleteScoringRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.InsertScoringRule(&ScoringRule{Name: "r1", Expr: "true", Points: 1, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteScoringRule("r1"); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := store.CountScoringRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+func TestGetAuditEntry(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	entry := &AuditEntry{
+		Timestamp: time.Now(), Method: "GET", URL: "http://example.com",
+		Host: "example.com", Action: "ALLOW", RiskSignals: "[]",
+	}
+	if err := store.InsertAuditEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.GetAuditEntry(entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil")
+	}
+	if got.Method != "GET" {
+		t.Errorf("method = %q, want GET", got.Method)
+	}
+
+	// Missing entry.
+	got, err = store.GetAuditEntry(9999)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for missing entry, got %+v", got)
+	}
+}
+
+func TestListAuditEntriesFiltered(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	entries := []*AuditEntry{
+		{Timestamp: now, Method: "GET", URL: "http://a.com/1", Host: "a.com", Action: "ALLOW", RiskScore: 0, RiskSignals: "[]"},
+		{Timestamp: now, Method: "POST", URL: "http://b.com/2", Host: "b.com", Action: "BLOCK", RiskScore: 12, RiskSignals: `["rule1"]`},
+		{Timestamp: now, Method: "GET", URL: "http://a.com/3", Host: "a.com", Action: "DENY", RiskScore: 0, RiskSignals: "[]"},
+	}
+	for _, e := range entries {
+		if err := store.InsertAuditEntry(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Filter by action.
+	got, err := store.ListAuditEntriesFiltered(AuditFilter{Action: "BLOCK"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1, got %d", len(got))
+	}
+	if got[0].Action != "BLOCK" {
+		t.Errorf("action = %q, want BLOCK", got[0].Action)
+	}
+
+	// Filter by host.
+	got, err = store.ListAuditEntriesFiltered(AuditFilter{Host: "a.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2, got %d", len(got))
+	}
+
+	// Filter by min score.
+	got, err = store.ListAuditEntriesFiltered(AuditFilter{MinScore: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1, got %d", len(got))
+	}
+
+	// Cursor-based pagination.
+	got, err = store.ListAuditEntriesFiltered(AuditFilter{AfterID: entries[2].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2, got %d", len(got))
+	}
+}
+
+func TestGetAuditStats(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	entries := []*AuditEntry{
+		{Timestamp: now, Method: "GET", URL: "http://a.com/1", Host: "a.com", Action: "ALLOW", RiskScore: 5, RiskSignals: `["sensitive_path"]`},
+		{Timestamp: now, Method: "POST", URL: "http://b.com/2", Host: "b.com", Action: "BLOCK", RiskScore: 12, RiskSignals: `["sensitive_path","credential_pattern"]`},
+		{Timestamp: now, Method: "GET", URL: "http://a.com/3", Host: "a.com", Action: "BAN", RiskScore: 25, RiskSignals: `["sensitive_path","credential_pattern","base64_payload"]`},
+	}
+	for _, e := range entries {
+		if err := store.InsertAuditEntry(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := store.GetAuditStats(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stats.TotalLastMinute != 3 {
+		t.Errorf("total = %d, want 3", stats.TotalLastMinute)
+	}
+	if stats.ByAction["ALLOW"] != 1 {
+		t.Errorf("ALLOW count = %d, want 1", stats.ByAction["ALLOW"])
+	}
+	if stats.ByAction["BLOCK"] != 1 {
+		t.Errorf("BLOCK count = %d, want 1", stats.ByAction["BLOCK"])
+	}
+	if stats.ByAction["BAN"] != 1 {
+		t.Errorf("BAN count = %d, want 1", stats.ByAction["BAN"])
+	}
+	if len(stats.TopHosts) == 0 {
+		t.Fatal("expected top hosts")
+	}
+	if stats.TopHosts[0].Host != "a.com" {
+		t.Errorf("top host = %q, want a.com", stats.TopHosts[0].Host)
+	}
+	if len(stats.RecentBans) != 1 {
+		t.Fatalf("expected 1 ban, got %d", len(stats.RecentBans))
+	}
+	if len(stats.RuleHitFrequency) == 0 {
+		t.Fatal("expected rule hit frequency data")
+	}
+	// sensitive_path should be most frequent (3 hits).
+	if stats.RuleHitFrequency[0].RuleName != "sensitive_path" {
+		t.Errorf("top rule = %q, want sensitive_path", stats.RuleHitFrequency[0].RuleName)
+	}
+	if stats.RuleHitFrequency[0].Count != 3 {
+		t.Errorf("top rule count = %d, want 3", stats.RuleHitFrequency[0].Count)
+	}
+}

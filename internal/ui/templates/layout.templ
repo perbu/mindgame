@@ -1,0 +1,27 @@
+package templates
+
+templ Layout(title, currentPage string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title } - MindGame</title>
+			<link rel="stylesheet" href="/static/style.css"/>
+			<script src="/static/htmx.min.js"></script>
+			<script src="/static/sse.js"></script>
+		</head>
+		<body>
+			<nav>
+				<span class="brand">MindGame</span>
+				<a href="/" class={ templ.KV("active", currentPage == "feed") }>Feed</a>
+				<a href="/domains" class={ templ.KV("active", currentPage == "domains") }>Domains</a>
+				<a href="/scoring" class={ templ.KV("active", currentPage == "scoring") }>Scoring</a>
+				<a href="/stats" class={ templ.KV("active", currentPage == "stats") }>Stats</a>
+			</nav>
+			<div class="container">
+				{ children... }
+			</div>
+		</body>
+	</html>
+}

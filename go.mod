@@ -3,6 +3,7 @@ module github.com/perbu/mindgame
 go 1.25.0
 
 require (
+	github.com/a-h/templ v0.3.977
 	github.com/google/cel-go v0.27.0
 	modernc.org/sqlite v1.46.1
 )

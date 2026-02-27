@@ -1,0 +1,137 @@
+package templates
+
+import (
+	"fmt"
+	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/scoring"
+)
+
+templ ScoringPage(rules []db.ScoringRule) {
+	@Layout("Scoring Rules", "scoring") {
+		<h1>Scoring Rules</h1>
+		<div class="card">
+			<h2>Add Rule</h2>
+			<form hx-post="/scoring" hx-target="#scoring-table" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+				<div class="form-row">
+					<div class="form-group">
+						<label>Name</label>
+						<input type="text" name="name" placeholder="rule_name" required/>
+					</div>
+					<div class="form-group">
+						<label>CEL Expression</label>
+						<input type="text" name="expr" placeholder={ `method == "POST"` } required style="min-width:300px"/>
+					</div>
+					<div class="form-group">
+						<label>Points</label>
+						<input type="number" name="points" value="5" min="1" required style="width:80px"/>
+					</div>
+					<div class="form-group">
+						<label>Note</label>
+						<input type="text" name="note" placeholder="optional"/>
+					</div>
+					<button type="submit">Add</button>
+				</div>
+			</form>
+		</div>
+		<div class="card">
+			<h2>Test Expression</h2>
+			<form hx-post="/scoring/test" hx-target="#test-result" hx-swap="innerHTML">
+				<div class="form-row">
+					<div class="form-group" style="flex:1">
+						<label>Method</label>
+						<input type="text" name="method" value="GET"/>
+					</div>
+					<div class="form-group" style="flex:2">
+						<label>URL</label>
+						<input type="text" name="url" value="http://example.com/test"/>
+					</div>
+					<div class="form-group" style="flex:1">
+						<label>Reason</label>
+						<input type="text" name="reason" value="test"/>
+					</div>
+				</div>
+				<div class="form-row">
+					<div class="form-group" style="flex:1">
+						<label>Body</label>
+						<textarea name="body" rows="2" placeholder="request body"></textarea>
+					</div>
+				</div>
+				<button type="submit" class="btn-secondary">Test All Rules</button>
+			</form>
+			<div id="test-result" style="margin-top:0.75rem"></div>
+		</div>
+		<div class="card">
+			<h2>Rules</h2>
+			<table>
+				<thead>
+					<tr>
+						<th>Enabled</th>
+						<th>Name</th>
+						<th>Expression</th>
+						<th>Points</th>
+						<th>Note</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody id="scoring-table">
+					for _, r := range rules {
+						@ScoringRow(r)
+					}
+				</tbody>
+			</table>
+		</div>
+	}
+}
+
+templ ScoringRows(rules []db.ScoringRule) {
+	for _, r := range rules {
+		@ScoringRow(r)
+	}
+}
+
+templ ScoringRow(r db.ScoringRule) {
+	<tr>
+		<td>
+			<label class="toggle">
+				if r.Enabled {
+					<input type="checkbox" checked hx-put={ "/scoring/" + r.Name } hx-target="#scoring-table" hx-swap="innerHTML" hx-include="closest tr" name="enabled" value="true"/>
+				} else {
+					<input type="checkbox" hx-put={ "/scoring/" + r.Name } hx-target="#scoring-table" hx-swap="innerHTML" hx-include="closest tr" name="enabled" value="true"/>
+				}
+				<span class="slider"></span>
+			</label>
+		</td>
+		<td class="mono">{ r.Name }</td>
+		<td class="mono" style="max-width:400px;word-break:break-all">{ r.Expr }</td>
+		<td>
+			<span class={ scoreClass(r.Points) }>{ fmt.Sprintf("%d", r.Points) }</span>
+			<input type="hidden" name="expr" value={ r.Expr }/>
+			<input type="hidden" name="points" value={ fmt.Sprintf("%d", r.Points) }/>
+			<input type="hidden" name="note" value={ r.Note }/>
+		</td>
+		<td>{ r.Note }</td>
+		<td>
+			<button class="btn-sm btn-danger" hx-delete={ "/scoring/" + r.Name } hx-target="#scoring-table" hx-swap="innerHTML" hx-confirm={ "Delete rule " + r.Name + "?" }>Delete</button>
+		</td>
+	</tr>
+}
+
+templ ScoringTestResult(result scoring.Result) {
+	<div class="test-panel">
+		<strong>Score: </strong>
+		<span class={ scoreClass(result.Score) }>{ fmt.Sprintf("%d", result.Score) }</span>
+		if len(result.Signals) > 0 {
+			<br/>
+			<strong>Triggered rules: </strong>
+			for i, s := range result.Signals {
+				if i > 0 {
+					,
+				}
+				<span class="mono">{ s }</span>
+			}
+		} else {
+			<br/>
+			<span class="mono" style="color:var(--text-dim)">No rules triggered</span>
+		}
+	</div>
+}

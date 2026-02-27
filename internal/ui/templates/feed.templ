@@ -1,0 +1,111 @@
+package templates
+
+import (
+	"fmt"
+	"github.com/perbu/mindgame/internal/db"
+)
+
+func actionBadgeClass(action string) string {
+	switch action {
+	case "ALLOW":
+		return "badge badge-allow"
+	case "BLOCK":
+		return "badge badge-block"
+	case "BAN":
+		return "badge badge-ban"
+	case "DENY":
+		return "badge badge-deny"
+	default:
+		return "badge badge-reject"
+	}
+}
+
+func scoreClass(score int) string {
+	switch {
+	case score >= 20:
+		return "score score-high"
+	case score >= 10:
+		return "score score-mid"
+	default:
+		return "score score-low"
+	}
+}
+
+templ FeedPage(entries []db.AuditEntry) {
+	@Layout("Live Feed", "feed") {
+		<h1>Live Feed</h1>
+		<div class="card">
+			<table>
+				<thead>
+					<tr>
+						<th>ID</th>
+						<th>Time</th>
+						<th>Action</th>
+						<th>Method</th>
+						<th>Host</th>
+						<th>URL</th>
+						<th>Score</th>
+						<th>Reason</th>
+					</tr>
+				</thead>
+				<tbody id="feed-body" hx-ext="sse" sse-connect="/feed/events" sse-swap="message" hx-swap="afterbegin">
+					for _, e := range entries {
+						@FeedRow(e)
+					}
+				</tbody>
+			</table>
+		</div>
+	}
+}
+
+templ FeedRow(e db.AuditEntry) {
+	<tr id={ fmt.Sprintf("row-%d", e.ID) } hx-get={ fmt.Sprintf("/feed/detail/%d", e.ID) } hx-target={ fmt.Sprintf("#detail-%d", e.ID) } hx-swap="innerHTML" style="cursor:pointer">
+		<td class="mono">{ fmt.Sprintf("%d", e.ID) }</td>
+		<td class="mono">{ e.Timestamp.Format("15:04:05") }</td>
+		<td><span class={ actionBadgeClass(e.Action) }>{ e.Action }</span></td>
+		<td>{ e.Method }</td>
+		<td>{ e.Host }</td>
+		<td class="truncate" title={ e.URL }>{ e.URL }</td>
+		<td><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></td>
+		<td class="truncate" title={ e.Reason }>{ e.Reason }</td>
+	</tr>
+	<tr id={ fmt.Sprintf("detail-%d", e.ID) } style="display:none"></tr>
+}
+
+templ FeedDetail(e *db.AuditEntry) {
+	<td colspan="8">
+		<div class="detail">
+			<dl>
+				<dt>Full URL</dt>
+				<dd class="mono">{ e.URL }</dd>
+				<dt>Reason</dt>
+				<dd>{ e.Reason }</dd>
+				<dt>Risk Score</dt>
+				<dd><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></dd>
+				<dt>Risk Signals</dt>
+				<dd class="mono">{ e.RiskSignals }</dd>
+				if e.RespStatus > 0 {
+					<dt>Response Status</dt>
+					<dd>{ fmt.Sprintf("%d", e.RespStatus) }</dd>
+				}
+				<dt>Request Headers</dt>
+				<dd><pre>{ e.ReqHeaders }</pre></dd>
+				if e.ReqBody != "" {
+					<dt>Request Body</dt>
+					<dd><pre>{ truncateString(e.ReqBody, 2000) }</pre></dd>
+				}
+				if e.RespBody != "" {
+					<dt>Response Body</dt>
+					<dd><pre>{ truncateString(e.RespBody, 2000) }</pre></dd>
+				}
+			</dl>
+		</div>
+	</td>
+}
+
+func truncateString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}

@@ -16,10 +16,12 @@ import (
 	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/proxy"
 	"github.com/perbu/mindgame/internal/scoring"
+	"github.com/perbu/mindgame/internal/ui"
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
+	uiAddr := flag.String("ui-addr", ":9090", "UI dashboard listen address")
 	dbPath := flag.String("db", "audit.db", "path to SQLite database")
 	caDir := flag.String("ca-dir", ".", "directory for CA certificate and key")
 	seedPath := flag.String("seed", "", "path to seed file with domain rules")
@@ -79,9 +81,33 @@ func main() {
 
 	handler := proxy.New(store, authority, pol, scorer)
 
-	srv := &http.Server{
+	// SSE broker connects proxy audit writes to the UI live feed.
+	broker := ui.NewBroker()
+	handler.SetNotifier(broker)
+
+	// reloadScorer compiles scoring rules from DB and hot-swaps the proxy's engine.
+	reloadScorer := func() error {
+		rules, err := store.ListScoringRules()
+		if err != nil {
+			return err
+		}
+		newScorer, err := scoring.New(rules)
+		if err != nil {
+			return err
+		}
+		handler.SetScorer(newScorer)
+		return nil
+	}
+
+	uiServer := ui.NewServer(store, pol, reloadScorer, broker)
+
+	proxySrv := &http.Server{
 		Addr:    *addr,
 		Handler: handler,
+	}
+	uiSrv := &http.Server{
+		Addr:    *uiAddr,
+		Handler: uiServer,
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
@@ -90,8 +116,15 @@ func main() {
 
 	go func() {
 		log.Printf("proxy listening on %s", *addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen error: %v", err)
+		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("proxy listen error: %v", err)
+		}
+	}()
+
+	go func() {
+		log.Printf("UI dashboard listening on %s", *uiAddr)
+		if err := uiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("UI listen error: %v", err)
 		}
 	}()
 
@@ -100,7 +133,10 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown error: %v", err)
+	if err := proxySrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("proxy shutdown error: %v", err)
+	}
+	if err := uiSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("UI shutdown error: %v", err)
 	}
 }

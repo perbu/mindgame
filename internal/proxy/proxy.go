@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/perbu/mindgame/internal/ca"
@@ -18,6 +19,11 @@ import (
 	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/scoring"
 )
+
+// AuditNotifier is called after every audit entry insertion.
+type AuditNotifier interface {
+	Publish(entry *db.AuditEntry)
+}
 
 // Hop-by-hop headers that must not be forwarded.
 var hopByHopHeaders = []string{
@@ -37,24 +43,36 @@ type Handler struct {
 	store     *db.Store
 	ca        *ca.CA
 	policy    *policy.Cache
-	scorer    *scoring.Engine
+	scorer    atomic.Pointer[scoring.Engine]
+	notifier  AuditNotifier
 	transport http.RoundTripper
 }
 
 // New creates a proxy handler backed by the given store, certificate authority,
 // policy cache, and scoring engine.
 func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.Engine) *Handler {
-	return &Handler{
+	h := &Handler{
 		store:  store,
 		ca:     authority,
 		policy: pol,
-		scorer: scorer,
 		transport: &http.Transport{
-			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-			TLSHandshakeTimeout:  10 * time.Second,
+			DialContext:            (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 		},
 	}
+	h.scorer.Store(scorer)
+	return h
+}
+
+// SetNotifier sets the audit notifier called after every audit insert.
+func (h *Handler) SetNotifier(n AuditNotifier) {
+	h.notifier = n
+}
+
+// SetScorer atomically replaces the scoring engine.
+func (h *Handler) SetScorer(s *scoring.Engine) {
+	h.scorer.Store(s)
 }
 
 // SetTransport overrides the default transport. Useful for tests that need
@@ -136,6 +154,8 @@ func (h *Handler) forwardRequest(r *http.Request, reqBody []byte, sr scoring.Res
 	}
 	if err := h.store.InsertAuditEntry(entry); err != nil {
 		log.Printf("audit log error: %v", err)
+	} else if h.notifier != nil {
+		h.notifier.Publish(entry)
 	}
 
 	return &forwardedResponse{
@@ -169,6 +189,8 @@ func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, r
 	}
 	if err := h.store.InsertAuditEntry(entry); err != nil {
 		log.Printf("audit log error: %v", err)
+	} else if h.notifier != nil {
+		h.notifier.Publish(entry)
 	}
 }
 
@@ -180,7 +202,7 @@ func (h *Handler) scoreRequest(r *http.Request, reqBody []byte) scoring.Result {
 			headers[k] = v[0]
 		}
 	}
-	return h.scorer.Eval(scoring.RequestVars{
+	return h.scorer.Load().Eval(scoring.RequestVars{
 		Method:   r.Method,
 		URL:      r.URL.String(),
 		Host:     r.URL.Hostname(),

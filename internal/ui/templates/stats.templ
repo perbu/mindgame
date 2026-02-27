@@ -1,0 +1,138 @@
+package templates
+
+import (
+	"fmt"
+	"github.com/perbu/mindgame/internal/db"
+)
+
+templ StatsPage(stats *db.AuditStats) {
+	@Layout("Statistics", "stats") {
+		<h1>Statistics</h1>
+		<div id="stats-content" hx-get="/stats/data" hx-trigger="every 30s" hx-swap="innerHTML">
+			@StatsContent(stats)
+		</div>
+	}
+}
+
+templ StatsContent(stats *db.AuditStats) {
+	<div class="stat-grid">
+		<div class="stat-card">
+			<div class="value">{ fmt.Sprintf("%d", stats.TotalLastMinute) }</div>
+			<div class="label">Requests (1h)</div>
+		</div>
+		<div class="stat-card">
+			<div class="value" style="color:var(--green)">{ fmt.Sprintf("%d", stats.ByAction["ALLOW"]) }</div>
+			<div class="label">Allowed</div>
+		</div>
+		<div class="stat-card">
+			<div class="value" style="color:var(--amber)">{ fmt.Sprintf("%d", stats.ByAction["BLOCK"]) }</div>
+			<div class="label">Blocked</div>
+		</div>
+		<div class="stat-card">
+			<div class="value" style="color:var(--red)">{ fmt.Sprintf("%d", stats.ByAction["BAN"]+stats.ByAction["DENY"]) }</div>
+			<div class="label">Banned/Denied</div>
+		</div>
+		<div class="stat-card">
+			<div class="value" style="color:var(--grey)">{ fmt.Sprintf("%d", stats.ByAction["REJECT"]) }</div>
+			<div class="label">Rejected</div>
+		</div>
+	</div>
+	<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+		<div class="card">
+			<h2>Top Hosts</h2>
+			if len(stats.TopHosts) == 0 {
+				<p style="color:var(--text-dim)">No data</p>
+			} else {
+				<table>
+					<thead>
+						<tr>
+							<th>Host</th>
+							<th>Requests</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, h := range stats.TopHosts {
+							<tr>
+								<td class="mono">{ h.Host }</td>
+								<td>{ fmt.Sprintf("%d", h.Count) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+		<div class="card">
+			<h2>Highest Risk Hosts</h2>
+			if len(stats.TopRiskHosts) == 0 {
+				<p style="color:var(--text-dim)">No data</p>
+			} else {
+				<table>
+					<thead>
+						<tr>
+							<th>Host</th>
+							<th>Avg Score</th>
+							<th>Requests</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, h := range stats.TopRiskHosts {
+							<tr>
+								<td class="mono">{ h.Host }</td>
+								<td><span class={ scoreClass(int(h.AvgScore)) }>{ fmt.Sprintf("%.1f", h.AvgScore) }</span></td>
+								<td>{ fmt.Sprintf("%d", h.Count) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+		<div class="card">
+			<h2>Rule Hit Frequency</h2>
+			if len(stats.RuleHitFrequency) == 0 {
+				<p style="color:var(--text-dim)">No data</p>
+			} else {
+				<table>
+					<thead>
+						<tr>
+							<th>Rule</th>
+							<th>Hits</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, r := range stats.RuleHitFrequency {
+							<tr>
+								<td class="mono">{ r.RuleName }</td>
+								<td>{ fmt.Sprintf("%d", r.Count) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+		<div class="card">
+			<h2>Recent Bans</h2>
+			if len(stats.RecentBans) == 0 {
+				<p style="color:var(--text-dim)">No bans</p>
+			} else {
+				<table>
+					<thead>
+						<tr>
+							<th>Time</th>
+							<th>Host</th>
+							<th>Score</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, e := range stats.RecentBans {
+							<tr>
+								<td class="mono">{ e.Timestamp.Format("15:04:05") }</td>
+								<td class="mono">{ e.Host }</td>
+								<td><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+	</div>
+}

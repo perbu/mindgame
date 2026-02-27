@@ -1,0 +1,84 @@
+package templates
+
+import (
+	"github.com/perbu/mindgame/internal/db"
+)
+
+templ DomainsPage(rules []db.DomainRule) {
+	@Layout("Domain Rules", "domains") {
+		<h1>Domain Rules</h1>
+		<div class="card">
+			<h2>Add Rule</h2>
+			<form hx-post="/domains" hx-target="#domain-table" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+				<div class="form-row">
+					<div class="form-group">
+						<label>Host</label>
+						<input type="text" name="host" placeholder="example.com" required/>
+					</div>
+					<div class="form-group">
+						<label>Tier</label>
+						<select name="tier">
+							<option value="allow">Allow</option>
+							<option value="deny">Deny</option>
+						</select>
+					</div>
+					<div class="form-group">
+						<label>Note</label>
+						<input type="text" name="note" placeholder="optional note"/>
+					</div>
+					<button type="submit">Add</button>
+				</div>
+			</form>
+		</div>
+		<div class="card">
+			<h2>Rules</h2>
+			<div class="form-row" style="margin-bottom: 0.75rem">
+				<input type="text" name="search" placeholder="Filter hosts..." hx-get="/domains" hx-trigger="keyup changed delay:300ms" hx-target="#domain-table" hx-swap="innerHTML" hx-include="this"/>
+			</div>
+			<table>
+				<thead>
+					<tr>
+						<th>Host</th>
+						<th>Tier</th>
+						<th>Status</th>
+						<th>Note</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody id="domain-table">
+					for _, r := range rules {
+						@DomainRow(r)
+					}
+				</tbody>
+			</table>
+		</div>
+	}
+}
+
+templ DomainRows(rules []db.DomainRule) {
+	for _, r := range rules {
+		@DomainRow(r)
+	}
+}
+
+templ DomainRow(r db.DomainRule) {
+	<tr>
+		<td class="mono">{ r.Host }</td>
+		<td>
+			if r.Tier == "allow" {
+				<span class="badge badge-allow">ALLOW</span>
+			} else {
+				<span class="badge badge-deny">DENY</span>
+			}
+		</td>
+		<td>
+			if r.Banned {
+				<span class="badge badge-banned">BANNED</span>
+			}
+		</td>
+		<td>{ r.Note }</td>
+		<td>
+			<button class="btn-sm btn-danger" hx-delete={ "/domains/" + r.Host } hx-target="#domain-table" hx-swap="innerHTML" hx-confirm={ "Delete rule for " + r.Host + "?" }>Delete</button>
+		</td>
+	</tr>
+}
