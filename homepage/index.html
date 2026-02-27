@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mindgame — MITM Audit Proxy for AI Agents</title>
+<meta name="description" content="Intercept, inspect, and score every HTTP request your AI agents make. Know not just what they accessed, but why.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg-deep: #060a12;
+  --bg: #0c1220;
+  --bg-surface: #121a2c;
+  --bg-elevated: #182240;
+  --border: #1c2b48;
+  --border-light: #243352;
+  --text: #b8c8e0;
+  --text-bright: #e4ecf7;
+  --text-dim: #4e6282;
+  --accent: #00e87b;
+  --accent-dim: #00e87b22;
+  --accent-glow: #00e87b44;
+  --warn: #ff7a3d;
+  --warn-dim: #ff7a3d22;
+  --danger: #ff3b5c;
+  --danger-dim: #ff3b5c22;
+  --info: #3b8bff;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: 'IBM Plex Sans', sans-serif;
+  background: var(--bg-deep);
+  color: var(--text);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ── Typography ── */
+h1, h2, h3, h4 {
+  font-family: 'Syne', sans-serif;
+  color: var(--text-bright);
+  line-height: 1.2;
+}
+
+code, pre, .mono {
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: opacity 0.2s;
+}
+a:hover { opacity: 0.8; }
+
+/* ── Layout ── */
+.container {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+section {
+  padding: 6rem 0;
+}
+
+.section-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 1rem;
+  display: block;
+}
+
+.section-title {
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  font-weight: 700;
+  margin-bottom: 1rem;
+}
+
+.section-desc {
+  font-size: 1.1rem;
+  color: var(--text);
+  max-width: 640px;
+  margin-bottom: 3rem;
+}
+
+/* ── Reveal animation ── */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.reveal-d1 { transition-delay: 0.1s; }
+.reveal-d2 { transition-delay: 0.2s; }
+.reveal-d3 { transition-delay: 0.3s; }
+.reveal-d4 { transition-delay: 0.4s; }
+
+/* ══════════════════════════════════
+   HERO
+   ══════════════════════════════════ */
+.hero {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+  padding: 4rem 0;
+}
+
+.hero-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.hero-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 64px 64px;
+  opacity: 0.25;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent);
+}
+
+.hero-glow {
+  position: absolute;
+  width: 600px;
+  height: 600px;
+  top: 10%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: radial-gradient(circle, var(--accent-dim) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.hero-content {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--accent);
+  border: 1px solid var(--accent-dim);
+  background: var(--accent-dim);
+  padding: 0.35rem 0.85rem;
+  border-radius: 100px;
+  margin-bottom: 2rem;
+}
+
+.hero-badge-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.hero h1 {
+  font-size: clamp(3rem, 8vw, 5.5rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin-bottom: 1.5rem;
+}
+
+.hero h1 .accent { color: var(--accent); }
+
+.hero-sub {
+  font-size: clamp(1.1rem, 2.5vw, 1.35rem);
+  color: var(--text);
+  max-width: 560px;
+  margin-bottom: 3rem;
+  line-height: 1.7;
+}
+
+.hero-cmd {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  padding: 0.85rem 1.25rem;
+  border-radius: 8px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.95rem;
+  color: var(--text-bright);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+.hero-cmd:hover { border-color: var(--border-light); }
+.hero-cmd .prompt { color: var(--text-dim); user-select: none; }
+.hero-cmd .copy-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  border-left: 1px solid var(--border);
+  padding-left: 1rem;
+}
+
+/* ══════════════════════════════════
+   NETWORK DIAGRAM
+   ══════════════════════════════════ */
+.diagram-section {
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.diagram-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 2rem 0;
+}
+
+.diagram-wrap svg {
+  width: 100%;
+  max-width: 880px;
+  height: auto;
+}
+
+/* SVG animations */
+@keyframes flow-right {
+  0% { stroke-dashoffset: 24; }
+  100% { stroke-dashoffset: 0; }
+}
+@keyframes flow-left {
+  0% { stroke-dashoffset: -24; }
+  100% { stroke-dashoffset: 0; }
+}
+.flow-r { animation: flow-right 1s linear infinite; }
+.flow-l { animation: flow-left 1s linear infinite; }
+
+@keyframes node-pulse {
+  0%, 100% { filter: drop-shadow(0 0 4px var(--accent-glow)); }
+  50% { filter: drop-shadow(0 0 12px var(--accent-glow)); }
+}
+.node-pulse { animation: node-pulse 3s ease-in-out infinite; }
+
+/* ══════════════════════════════════
+   THREE TIERS
+   ══════════════════════════════════ */
+.tiers {
+  background: var(--bg-deep);
+}
+
+.tier-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .tier-grid { grid-template-columns: 1fr; }
+}
+
+.tier-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2rem;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s;
+}
+.tier-card:hover { border-color: var(--border-light); }
+
+.tier-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+}
+.tier-allow::before { background: var(--accent); }
+.tier-default::before { background: var(--warn); }
+.tier-deny::before { background: var(--danger); }
+
+.tier-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1.25rem;
+  font-size: 1.1rem;
+}
+.tier-allow .tier-icon { background: var(--accent-dim); color: var(--accent); }
+.tier-default .tier-icon { background: var(--warn-dim); color: var(--warn); }
+.tier-deny .tier-icon { background: var(--danger-dim); color: var(--danger); }
+
+.tier-name {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 1.25rem;
+  color: var(--text-bright);
+  margin-bottom: 0.5rem;
+}
+
+.tier-desc {
+  font-size: 0.95rem;
+  color: var(--text);
+  margin-bottom: 1.25rem;
+}
+
+.tier-detail {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  line-height: 1.8;
+}
+
+.tier-tag {
+  display: inline-block;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+}
+.tier-allow .tier-tag { background: var(--accent-dim); color: var(--accent); }
+.tier-default .tier-tag { background: var(--warn-dim); color: var(--warn); }
+.tier-deny .tier-tag { background: var(--danger-dim); color: var(--danger); }
+
+/* ══════════════════════════════════
+   SCORING
+   ══════════════════════════════════ */
+.scoring {
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.scoring-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: start;
+}
+
+@media (max-width: 768px) {
+  .scoring-layout { grid-template-columns: 1fr; }
+}
+
+.scoring-example {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.scoring-example-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.scoring-example-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.scoring-example pre {
+  padding: 1.25rem;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  color: var(--text);
+}
+
+.cel-kw { color: var(--info); }
+.cel-str { color: var(--accent); }
+.cel-num { color: var(--warn); }
+.cel-comment { color: var(--text-dim); font-style: italic; }
+
+.score-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.score-bar-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  min-width: 60px;
+}
+
+.score-bar-track {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+
+.score-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 1s ease;
+}
+.score-bar-fill.green { background: var(--accent); }
+.score-bar-fill.amber { background: var(--warn); }
+.score-bar-fill.red { background: var(--danger); }
+
+.score-bar-value {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  font-weight: 500;
+  min-width: 28px;
+  text-align: right;
+}
+.score-bar-value.green { color: var(--accent); }
+.score-bar-value.amber { color: var(--warn); }
+.score-bar-value.red { color: var(--danger); }
+
+/* ══════════════════════════════════
+   FEATURES
+   ══════════════════════════════════ */
+.features {
+  background: var(--bg-deep);
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .feature-grid { grid-template-columns: 1fr; }
+}
+
+.feature-card {
+  padding: 1.75rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  transition: border-color 0.3s;
+}
+.feature-card:hover { border-color: var(--border-light); }
+
+.feature-icon {
+  font-size: 1.5rem;
+  margin-bottom: 1rem;
+  display: block;
+}
+
+.feature-name {
+  font-family: 'Syne', sans-serif;
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--text-bright);
+  margin-bottom: 0.5rem;
+}
+
+.feature-desc {
+  font-size: 0.9rem;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+/* ══════════════════════════════════
+   QUICK START
+   ══════════════════════════════════ */
+.quickstart {
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.code-block {
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  max-width: 720px;
+}
+
+.code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.code-dots {
+  display: flex;
+  gap: 6px;
+}
+.code-dots span {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border-light);
+}
+
+.code-filename {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.code-block pre {
+  padding: 1.5rem;
+  font-size: 0.85rem;
+  line-height: 1.8;
+  overflow-x: auto;
+  color: var(--text);
+}
+
+.ck { color: var(--info); }
+.cs { color: var(--accent); }
+.cv { color: var(--text-bright); }
+.cc { color: var(--text-dim); font-style: italic; }
+.cn { color: var(--warn); }
+
+/* ══════════════════════════════════
+   REQUEST FLOW DIAGRAM
+   ══════════════════════════════════ */
+.flow-section {
+  background: var(--bg-deep);
+}
+
+.flow-diagram {
+  display: flex;
+  justify-content: center;
+  padding: 1rem 0;
+}
+
+.flow-diagram svg {
+  width: 100%;
+  max-width: 820px;
+  height: auto;
+}
+
+/* ══════════════════════════════════
+   FOOTER
+   ══════════════════════════════════ */
+footer {
+  padding: 3rem 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-deep);
+}
+
+.footer-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.footer-brand {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--text-bright);
+}
+
+.footer-links {
+  display: flex;
+  gap: 2rem;
+  list-style: none;
+}
+
+.footer-links a {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  transition: color 0.2s;
+}
+.footer-links a:hover { color: var(--text); opacity: 1; }
+
+.footer-license {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+</style>
+</head>
+
+<body>
+
+<!-- ═══════════ HERO ═══════════ -->
+<section class="hero">
+  <div class="hero-bg">
+    <div class="hero-grid"></div>
+    <div class="hero-glow"></div>
+  </div>
+  <div class="container hero-content">
+    <div class="hero-badge reveal">
+      <span class="hero-badge-dot"></span>
+      Open Source &middot; MIT License
+    </div>
+    <h1 class="reveal reveal-d1">mind<span class="accent">game</span></h1>
+    <p class="hero-sub reveal reveal-d2">
+      MITM audit proxy for AI agents. Intercept HTTPS, enforce intent declarations, score every request for risk.
+    </p>
+    <div class="hero-cmd reveal reveal-d3" onclick="navigator.clipboard.writeText('docker pull ghcr.io/perbu/mindgame')">
+      <span><span class="prompt">$</span> docker pull ghcr.io/perbu/mindgame</span>
+      <span class="copy-hint">click to copy</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ NETWORK TOPOLOGY ═══════════ -->
+<section class="diagram-section">
+  <div class="container">
+    <span class="section-label reveal">Deployment</span>
+    <h2 class="section-title reveal reveal-d1">Sits between agents and the internet</h2>
+    <p class="section-desc reveal reveal-d2">
+      Runs as a container on both the internal agent network and the external network.
+      Agents have no direct internet access. All traffic flows through Mindgame.
+    </p>
+    <div class="diagram-wrap reveal reveal-d3">
+      <svg viewBox="0 0 880 340" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- Internal network boundary -->
+        <rect x="20" y="20" width="500" height="300" rx="16" stroke="#1c2b48" stroke-width="1.5" stroke-dasharray="6 4" fill="#0c122008"/>
+        <text x="40" y="52" font-family="IBM Plex Mono, monospace" font-size="11" fill="#4e6282" letter-spacing="0.1em">INTERNAL NETWORK</text>
+
+        <!-- External network boundary -->
+        <rect x="580" y="20" width="280" height="300" rx="16" stroke="#1c2b48" stroke-width="1.5" stroke-dasharray="6 4" fill="#0c122008"/>
+        <text x="600" y="52" font-family="IBM Plex Mono, monospace" font-size="11" fill="#4e6282" letter-spacing="0.1em">EXTERNAL</text>
+
+        <!-- Agent 1 -->
+        <rect x="60" y="90" width="150" height="72" rx="10" fill="#121a2c" stroke="#1c2b48" stroke-width="1.5"/>
+        <text x="135" y="122" font-family="Syne, sans-serif" font-size="14" font-weight="600" fill="#e4ecf7" text-anchor="middle">Agent 1</text>
+        <text x="135" y="142" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">claude-code</text>
+
+        <!-- Agent 2 -->
+        <rect x="60" y="195" width="150" height="72" rx="10" fill="#121a2c" stroke="#1c2b48" stroke-width="1.5"/>
+        <text x="135" y="227" font-family="Syne, sans-serif" font-size="14" font-weight="600" fill="#e4ecf7" text-anchor="middle">Agent 2</text>
+        <text x="135" y="247" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">autogpt</text>
+
+        <!-- Flow lines: agents to proxy -->
+        <line x1="210" y1="126" x2="320" y2="170" stroke="#00e87b" stroke-width="1.5" stroke-dasharray="6 6" class="flow-r"/>
+        <line x1="210" y1="231" x2="320" y2="190" stroke="#00e87b" stroke-width="1.5" stroke-dasharray="6 6" class="flow-r"/>
+
+        <!-- Mindgame proxy -->
+        <g class="node-pulse">
+          <rect x="320" y="130" width="170" height="100" rx="12" fill="#121a2c" stroke="#00e87b" stroke-width="2"/>
+          <text x="405" y="168" font-family="Syne, sans-serif" font-size="16" font-weight="700" fill="#00e87b" text-anchor="middle">mindgame</text>
+          <text x="405" y="189" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">:8080 proxy / :9090 ui</text>
+          <text x="405" y="216" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">audit.db</text>
+        </g>
+
+        <!-- Flow line: proxy to internet -->
+        <line x1="490" y1="180" x2="620" y2="180" stroke="#00e87b" stroke-width="1.5" stroke-dasharray="6 6" class="flow-r"/>
+
+        <!-- Blocked flow (red, bounced) -->
+        <line x1="490" y1="192" x2="560" y2="240" stroke="#ff3b5c" stroke-width="1" stroke-dasharray="4 4" opacity="0.5"/>
+        <text x="555" y="260" font-family="IBM Plex Mono, monospace" font-size="9" fill="#ff3b5c" text-anchor="middle">BLOCKED</text>
+
+        <!-- Internet -->
+        <g transform="translate(720, 140)">
+          <!-- Cloud shape -->
+          <ellipse cx="0" cy="40" rx="80" ry="40" fill="#121a2c" stroke="#1c2b48" stroke-width="1.5"/>
+          <text x="0" y="36" font-family="Syne, sans-serif" font-size="14" font-weight="600" fill="#e4ecf7" text-anchor="middle">Internet</text>
+          <text x="0" y="52" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">*.com</text>
+        </g>
+
+        <!-- Labels on flow lines -->
+        <text x="260" y="138" font-family="IBM Plex Mono, monospace" font-size="9" fill="#00e87b">http_proxy</text>
+        <text x="520" y="172" font-family="IBM Plex Mono, monospace" font-size="9" fill="#00e87b">TLS</text>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ THREE TIERS ═══════════ -->
+<section class="tiers">
+  <div class="container">
+    <span class="section-label reveal">Domain Policy</span>
+    <h2 class="section-title reveal reveal-d1">Three tiers of trust</h2>
+    <p class="section-desc reveal reveal-d2">
+      Every domain falls into one of three tiers. Rules live in SQLite, editable at runtime.
+    </p>
+
+    <div class="tier-grid">
+      <div class="tier-card tier-allow reveal reveal-d1">
+        <div class="tier-icon">&#x2713;</div>
+        <div class="tier-name">Allow</div>
+        <div class="tier-desc">
+          Trusted domains. Model APIs, known services. Forwarded and logged without friction.
+        </div>
+        <div class="tier-detail">
+          X-Reason not required<br>
+          Always forwarded<br>
+          Score recorded, never blocks
+        </div>
+        <span class="tier-tag">api.anthropic.com</span>
+      </div>
+
+      <div class="tier-card tier-default reveal reveal-d2">
+        <div class="tier-icon">?</div>
+        <div class="tier-name">Default</div>
+        <div class="tier-desc">
+          Everything else. Must declare intent. Subject to risk scoring.
+        </div>
+        <div class="tier-detail">
+          X-Reason required<br>
+          Score 0&ndash;9: forward<br>
+          Score 10&ndash;19: block<br>
+          Score 20+: block &amp; ban host
+        </div>
+        <span class="tier-tag">unknown domains</span>
+      </div>
+
+      <div class="tier-card tier-deny reveal reveal-d3">
+        <div class="tier-icon">&#x2717;</div>
+        <div class="tier-name">Deny</div>
+        <div class="tier-desc">
+          Blocked outright. Static rules or dynamic bans from high-risk scores.
+        </div>
+        <div class="tier-detail">
+          Always blocked (403)<br>
+          Attempt logged<br>
+          Bans require human review to lift
+        </div>
+        <span class="tier-tag">evil.example.com</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ REQUEST FLOW ═══════════ -->
+<section class="flow-section">
+  <div class="container">
+    <span class="section-label reveal">Request Lifecycle</span>
+    <h2 class="section-title reveal reveal-d1">Every request, inspected</h2>
+    <p class="section-desc reveal reveal-d2">
+      TLS decrypted. Headers checked. Body scored. Everything logged.
+    </p>
+    <div class="flow-diagram reveal reveal-d3">
+      <svg viewBox="0 0 820 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- Step boxes -->
+        <!-- 1. Request -->
+        <rect x="0" y="60" width="120" height="80" rx="10" fill="#121a2c" stroke="#1c2b48" stroke-width="1.5"/>
+        <text x="60" y="95" font-family="Syne, sans-serif" font-size="12" font-weight="600" fill="#e4ecf7" text-anchor="middle">CONNECT</text>
+        <text x="60" y="115" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">TLS intercept</text>
+
+        <!-- Arrow -->
+        <line x1="120" y1="100" x2="170" y2="100" stroke="#1c2b48" stroke-width="1.5"/>
+        <polygon points="168,95 178,100 168,105" fill="#1c2b48"/>
+
+        <!-- 2. Domain check -->
+        <rect x="180" y="60" width="120" height="80" rx="10" fill="#121a2c" stroke="#1c2b48" stroke-width="1.5"/>
+        <text x="240" y="95" font-family="Syne, sans-serif" font-size="12" font-weight="600" fill="#e4ecf7" text-anchor="middle">Domain</text>
+        <text x="240" y="115" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">allow / deny?</text>
+
+        <!-- Branch: deny -->
+        <line x1="240" y1="140" x2="240" y2="175" stroke="#ff3b5c" stroke-width="1.5"/>
+        <text x="240" y="193" font-family="IBM Plex Mono, monospace" font-size="10" font-weight="500" fill="#ff3b5c" text-anchor="middle">403 DENY</text>
+
+        <!-- Arrow -->
+        <line x1="300" y1="100" x2="350" y2="100" stroke="#1c2b48" stroke-width="1.5"/>
+        <polygon points="348,95 358,100 348,105" fill="#1c2b48"/>
+
+        <!-- 3. Header check -->
+        <rect x="360" y="60" width="120" height="80" rx="10" fill="#121a2c" stroke="#1c2b48" stroke-width="1.5"/>
+        <text x="420" y="95" font-family="Syne, sans-serif" font-size="12" font-weight="600" fill="#e4ecf7" text-anchor="middle">X-Reason</text>
+        <text x="420" y="115" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">header present?</text>
+
+        <!-- Branch: missing -->
+        <line x1="420" y1="140" x2="420" y2="175" stroke="#ff7a3d" stroke-width="1.5"/>
+        <text x="420" y="193" font-family="IBM Plex Mono, monospace" font-size="10" font-weight="500" fill="#ff7a3d" text-anchor="middle">400 REJECT</text>
+
+        <!-- Arrow -->
+        <line x1="480" y1="100" x2="530" y2="100" stroke="#1c2b48" stroke-width="1.5"/>
+        <polygon points="528,95 538,100 528,105" fill="#1c2b48"/>
+
+        <!-- 4. CEL scoring -->
+        <rect x="540" y="60" width="120" height="80" rx="10" fill="#121a2c" stroke="#ff7a3d" stroke-width="1.5"/>
+        <text x="600" y="95" font-family="Syne, sans-serif" font-size="12" font-weight="600" fill="#e4ecf7" text-anchor="middle">CEL Score</text>
+        <text x="600" y="115" font-family="IBM Plex Mono, monospace" font-size="9" fill="#ff7a3d" text-anchor="middle">risk heuristics</text>
+
+        <!-- Branch: high score -->
+        <line x1="600" y1="140" x2="600" y2="175" stroke="#ff3b5c" stroke-width="1.5"/>
+        <text x="600" y="193" font-family="IBM Plex Mono, monospace" font-size="10" font-weight="500" fill="#ff3b5c" text-anchor="middle">BLOCK / BAN</text>
+
+        <!-- Arrow -->
+        <line x1="660" y1="100" x2="710" y2="100" stroke="#1c2b48" stroke-width="1.5"/>
+        <polygon points="708,95 718,100 708,105" fill="#1c2b48"/>
+
+        <!-- 5. Forward -->
+        <rect x="720" y="60" width="100" height="80" rx="10" fill="#121a2c" stroke="#00e87b" stroke-width="1.5"/>
+        <text x="770" y="95" font-family="Syne, sans-serif" font-size="12" font-weight="600" fill="#00e87b" text-anchor="middle">Forward</text>
+        <text x="770" y="115" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">log & relay</text>
+
+        <!-- Top labels -->
+        <text x="60" y="45" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">1</text>
+        <text x="240" y="45" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">2</text>
+        <text x="420" y="45" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">3</text>
+        <text x="600" y="45" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">4</text>
+        <text x="770" y="45" font-family="IBM Plex Mono, monospace" font-size="9" fill="#4e6282" text-anchor="middle">5</text>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ SCORING ═══════════ -->
+<section class="scoring">
+  <div class="container">
+    <span class="section-label reveal">Risk Scoring</span>
+    <h2 class="section-title reveal reveal-d1">CEL-powered heuristics</h2>
+    <p class="section-desc reveal reveal-d2">
+      Scoring rules are CEL expressions stored in the database. Edit them at runtime. No recompile. No restart.
+    </p>
+
+    <div class="scoring-layout">
+      <div class="reveal reveal-d2">
+        <div class="scoring-example">
+          <div class="scoring-example-header">
+            <span class="scoring-example-dot" style="background: var(--danger)"></span>
+            <span class="scoring-example-dot" style="background: var(--warn)"></span>
+            <span class="scoring-example-dot" style="background: var(--accent)"></span>
+            scoring_rules
+          </div>
+          <pre><span class="cel-comment">// Flag sensitive paths</span>
+<span class="cel-kw">path</span>.matches(<span class="cel-str">"(?i)/\\.env|/\\.git|/admin"</span>)
+  <span class="cel-comment">// +5 points</span>
+
+<span class="cel-comment">// Credential patterns in body</span>
+<span class="cel-kw">body</span>.matches(<span class="cel-str">"(?i)bearer [a-z0-9_-]+|sk-[a-z0-9]+"</span>)
+  <span class="cel-comment">// +8 points</span>
+
+<span class="cel-comment">// Confidential content</span>
+<span class="cel-kw">body</span>.matches(<span class="cel-str">"(?i)confidential|secret|api_key"</span>)
+  <span class="cel-comment">// +5 points</span>
+
+<span class="cel-comment">// Large outbound POST</span>
+<span class="cel-kw">method</span> == <span class="cel-str">"POST"</span> && <span class="cel-kw">body_size</span> > <span class="cel-num">65536</span>
+  <span class="cel-comment">// +3 points</span></pre>
+        </div>
+      </div>
+
+      <div class="reveal reveal-d3">
+        <h3 style="font-size: 1.1rem; margin-bottom: 0.5rem; color: var(--text-bright);">Score determines action</h3>
+        <p style="font-size: 0.9rem; color: var(--text); margin-bottom: 2rem;">
+          Points accumulate across all matching rules. Thresholds are evaluated for default-tier traffic.
+        </p>
+
+        <div class="score-bar">
+          <span class="score-bar-label">0&ndash;9</span>
+          <div class="score-bar-track"><div class="score-bar-fill green" style="width: 30%"></div></div>
+          <span class="score-bar-value green">ALLOW</span>
+        </div>
+        <div class="score-bar">
+          <span class="score-bar-label">10&ndash;19</span>
+          <div class="score-bar-track"><div class="score-bar-fill amber" style="width: 60%"></div></div>
+          <span class="score-bar-value amber">BLOCK</span>
+        </div>
+        <div class="score-bar">
+          <span class="score-bar-label">20+</span>
+          <div class="score-bar-track"><div class="score-bar-fill red" style="width: 100%"></div></div>
+          <span class="score-bar-value red">BAN</span>
+        </div>
+
+        <p style="font-size: 0.85rem; color: var(--text-dim); margin-top: 2rem; line-height: 1.7;">
+          Bans add the host to the deny list with a <code style="color: var(--warn);">banned</code> flag.
+          Requires human review to lift. Allowed-tier domains are never blocked &mdash; score is recorded for forensics only.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ FEATURES ═══════════ -->
+<section class="features">
+  <div class="container">
+    <span class="section-label reveal">Features</span>
+    <h2 class="section-title reveal reveal-d1">What's in the box</h2>
+
+    <div class="feature-grid">
+      <div class="feature-card reveal reveal-d1">
+        <span class="feature-icon" style="color: var(--accent);">&#9881;</span>
+        <div class="feature-name">HTTPS Interception</div>
+        <div class="feature-desc">Full MITM via CONNECT tunneling. Auto-generates a CA on first run, mints certs on the fly.</div>
+      </div>
+      <div class="feature-card reveal reveal-d2">
+        <span class="feature-icon" style="color: var(--warn);">&#9638;</span>
+        <div class="feature-name">SQLite Audit Log</div>
+        <div class="feature-desc">Every request and response. Full headers, full bodies. One file, queryable with standard tools.</div>
+      </div>
+      <div class="feature-card reveal reveal-d3">
+        <span class="feature-icon" style="color: var(--info);">&#8644;</span>
+        <div class="feature-name">Web UI</div>
+        <div class="feature-desc">Live request feed via SSE. Domain and scoring rule management. Statistics dashboard. Built with templ + HTMX.</div>
+      </div>
+      <div class="feature-card reveal reveal-d1">
+        <span class="feature-icon" style="color: var(--danger);">&#9670;</span>
+        <div class="feature-name">Dynamic Bans</div>
+        <div class="feature-desc">High-risk scores automatically ban the host. Distinguished from manual rules. Reviewable via UI.</div>
+      </div>
+      <div class="feature-card reveal reveal-d2">
+        <span class="feature-icon" style="color: var(--accent);">&#9783;</span>
+        <div class="feature-name">Single Binary</div>
+        <div class="feature-desc">Go binary with embedded UI assets. No runtime dependencies. Runs in a container or bare metal.</div>
+      </div>
+      <div class="feature-card reveal reveal-d3">
+        <span class="feature-icon" style="color: var(--warn);">&#10070;</span>
+        <div class="feature-name">Dream Mode</div>
+        <div class="feature-desc">Ambient full-screen visualization of live traffic. Designed for NOC wall displays. Particle-based, color-coded by risk.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ QUICK START ═══════════ -->
+<section class="quickstart">
+  <div class="container">
+    <span class="section-label reveal">Quick Start</span>
+    <h2 class="section-title reveal reveal-d1">Running in 60 seconds</h2>
+    <p class="section-desc reveal reveal-d2">
+      Drop Mindgame next to your agents. Internal network for agents, Mindgame bridges to the outside.
+    </p>
+
+    <div class="code-block reveal reveal-d3">
+      <div class="code-header">
+        <div class="code-dots"><span></span><span></span><span></span></div>
+        <span class="code-filename">docker-compose.yml</span>
+      </div>
+      <pre><span class="ck">services</span>:
+  <span class="cv">mindgame</span>:
+    <span class="ck">image</span>: <span class="cs">ghcr.io/perbu/mindgame:latest</span>
+    <span class="ck">ports</span>:
+      - <span class="cs">"9090:9090"</span>  <span class="cc"># Web UI</span>
+    <span class="ck">volumes</span>:
+      - <span class="cs">./data:/data</span>
+    <span class="ck">networks</span>:
+      - <span class="cv">internal</span>
+      - <span class="cv">external</span>
+
+  <span class="cv">agent</span>:
+    <span class="ck">image</span>: <span class="cs">your-agent:latest</span>
+    <span class="ck">environment</span>:
+      - <span class="cv">http_proxy</span>=<span class="cs">http://mindgame:8080</span>
+      - <span class="cv">https_proxy</span>=<span class="cs">http://mindgame:8080</span>
+      - <span class="cv">NODE_EXTRA_CA_CERTS</span>=<span class="cs">/certs/ca.pem</span>
+    <span class="ck">volumes</span>:
+      - <span class="cs">./data/ca.pem:/certs/ca.pem:ro</span>
+    <span class="ck">networks</span>:
+      - <span class="cv">internal</span>  <span class="cc"># no direct internet</span>
+
+<span class="ck">networks</span>:
+  <span class="cv">internal</span>:
+    <span class="ck">internal</span>: <span class="cn">true</span>  <span class="cc"># isolated, no egress</span>
+  <span class="cv">external</span>:</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ FOOTER ═══════════ -->
+<footer>
+  <div class="container footer-inner">
+    <span class="footer-brand">mindgame</span>
+    <ul class="footer-links">
+      <li><a href="https://github.com/perbu/mindgame">GitHub</a></li>
+      <li><a href="https://github.com/perbu/mindgame/blob/main/spec.md">Spec</a></li>
+      <li><a href="https://github.com/perbu/mindgame/issues">Issues</a></li>
+    </ul>
+    <span class="footer-license">MIT License</span>
+  </div>
+</footer>
+
+<script>
+// Scroll-triggered reveal
+const obs = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+}, { threshold: 0.15 });
+document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+</script>
+
+</body>
+</html>
