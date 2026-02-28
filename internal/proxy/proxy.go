@@ -651,12 +651,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Clean — reconstruct the response with buffered body and write to client.
-		resp.Body = io.NopCloser(bytes.NewReader(buf.FullBody))
-		resp.ContentLength = int64(len(buf.FullBody))
-		resp.Write(tlsConn)
-
-		// Create audit entry.
+		// Insert audit entry before writing the response to the hijacked
+		// connection.  Unlike a buffered ResponseWriter, writes to the raw
+		// TLS conn are visible to the client immediately, so the entry must
+		// be persisted first to avoid a race with callers that check the
+		// audit log right after reading the response.
 		reqHeaders, _ := json.Marshal(req.Header)
 		entry := &db.AuditEntry{
 			Timestamp:       time.Now(),
@@ -677,6 +676,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			Action:          "ALLOW",
 		}
 		h.insertAndNotify(entry)
+
+		// Write buffered response to client.
+		resp.Body = io.NopCloser(bytes.NewReader(buf.FullBody))
+		resp.ContentLength = int64(len(buf.FullBody))
+		resp.Write(tlsConn)
 	}
 }
 
