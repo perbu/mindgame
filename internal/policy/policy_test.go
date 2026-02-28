@@ -132,6 +132,16 @@ func TestCacheReload(t *testing.T) {
 	}
 }
 
+func TestStopDoubleCallNoPanic(t *testing.T) {
+	store := openTestStore(t)
+	c, err := NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Stop()
+	c.Stop() // second call should not panic
+}
+
 func TestParseSeedFile(t *testing.T) {
 	content := `# This is a comment
 allow api.anthropic.com   # Anthropic API

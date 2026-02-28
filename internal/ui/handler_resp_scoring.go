@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -21,6 +22,11 @@ func (s *Server) handleRespScoringCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := scoring.ValidateResponseExpr(expr); err != nil {
+		http.Error(w, "invalid expression: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	err = s.store.InsertResponseScoringRule(&db.ScoringRule{
 		Name:    name,
 		Expr:    expr,
@@ -29,12 +35,14 @@ func (s *Server) handleRespScoringCreate(w http.ResponseWriter, r *http.Request)
 		Note:    note,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("insert response scoring rule", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	if err := s.reloadRespScorer(); err != nil {
-		http.Error(w, "rule saved but scorer reload failed: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("reload resp scorer after create", "error", err)
+		http.Error(w, "rule saved but failed to activate", http.StatusInternalServerError)
 		return
 	}
 
@@ -54,13 +62,20 @@ func (s *Server) handleRespScoringUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := scoring.ValidateResponseExpr(expr); err != nil {
+		http.Error(w, "invalid expression: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if err := s.store.UpdateResponseScoringRule(name, expr, points, enabled, note); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("update response scoring rule", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	if err := s.reloadRespScorer(); err != nil {
-		http.Error(w, "rule saved but scorer reload failed: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("reload resp scorer after update", "error", err)
+		http.Error(w, "rule saved but failed to activate", http.StatusInternalServerError)
 		return
 	}
 
@@ -71,12 +86,14 @@ func (s *Server) handleRespScoringDelete(w http.ResponseWriter, r *http.Request)
 	name := r.PathValue("name")
 
 	if err := s.store.DeleteResponseScoringRule(name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("delete response scoring rule", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	if err := s.reloadRespScorer(); err != nil {
-		http.Error(w, "rule deleted but scorer reload failed: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("reload resp scorer after delete", "error", err)
+		http.Error(w, "rule deleted but failed to activate", http.StatusInternalServerError)
 		return
 	}
 
@@ -103,7 +120,8 @@ func (s *Server) handleRespScoringTest(w http.ResponseWriter, r *http.Request) {
 	// Load current response rules from DB and compile a fresh engine.
 	rules, err := s.store.ListResponseScoringRules()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("list response scoring rules for test", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -129,7 +147,8 @@ func (s *Server) handleRespScoringTest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderRespScoringRows(w http.ResponseWriter, r *http.Request) {
 	rules, err := s.store.ListResponseScoringRules()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("list response scoring rules for render", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	templates.RespScoringRows(rules).Render(r.Context(), w)

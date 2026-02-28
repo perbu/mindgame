@@ -188,12 +188,16 @@ func main() {
 	uiServer := ui.NewServer(store, pol, reloadScorer, reloadRespScorer, broker)
 
 	proxySrv := &http.Server{
-		Addr:    *addr,
-		Handler: handler,
+		Addr:              *addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	uiSrv := &http.Server{
-		Addr:    *uiAddr,
-		Handler: uiServer,
+		Addr:              *uiAddr,
+		Handler:           uiServer,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
@@ -201,23 +205,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	errCh := make(chan error, 2)
 	go func() {
 		slog.Info("proxy listening", "addr", *addr)
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("proxy listen error", "error", err)
-			os.Exit(1)
+			errCh <- fmt.Errorf("proxy: %w", err)
 		}
 	}()
 
 	go func() {
 		slog.Info("UI dashboard listening", "addr", *uiAddr)
 		if err := uiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("UI listen error", "error", err)
-			os.Exit(1)
+			errCh <- fmt.Errorf("ui: %w", err)
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		slog.Error("server failed", "error", err)
+	}
 	slog.Info("shutting down")
 
 	// Close broker first so SSE handlers exit and connections drain.

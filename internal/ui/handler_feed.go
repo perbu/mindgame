@@ -13,7 +13,8 @@ import (
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	entries, err := s.store.ListAuditEntries(50)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("list audit entries", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	templates.FeedPage(entries).Render(r.Context(), w)
@@ -65,7 +66,8 @@ func (s *Server) handleFeedDetail(w http.ResponseWriter, r *http.Request) {
 
 	entry, err := s.store.GetAuditEntry(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("get audit entry", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	if entry == nil {

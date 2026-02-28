@@ -110,8 +110,13 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 	if e.Action != "ALLOW" {
 		t.Errorf("audit action = %q, want ALLOW", e.Action)
 	}
-	if string(e.RespBody) != "origin response" {
-		t.Errorf("audit resp_body = %q, want %q", string(e.RespBody), "origin response")
+	// Bodies are only available via GetAuditEntry (list queries omit BLOBs).
+	detail, err := store.GetAuditEntry(e.ID)
+	if err != nil {
+		t.Fatalf("GetAuditEntry: %v", err)
+	}
+	if string(detail.RespBody) != "origin response" {
+		t.Errorf("audit resp_body = %q, want %q", string(detail.RespBody), "origin response")
 	}
 }
 
@@ -202,10 +207,15 @@ func TestIntegrationCONNECT(t *testing.T) {
 	if e.Method != "GET" {
 		t.Errorf("audit method = %q, want GET", e.Method)
 	}
-	if string(e.RespBody) != "tls-intercepted" {
-		t.Errorf("audit resp_body = %q, want %q", string(e.RespBody), "tls-intercepted")
-	}
 	if e.Reason != "connect integration test" {
 		t.Errorf("audit reason = %q, want %q", e.Reason, "connect integration test")
+	}
+	// Bodies are only available via GetAuditEntry (list queries omit BLOBs).
+	detail, err := store.GetAuditEntry(e.ID)
+	if err != nil {
+		t.Fatalf("GetAuditEntry: %v", err)
+	}
+	if string(detail.RespBody) != "tls-intercepted" {
+		t.Errorf("audit resp_body = %q, want %q", string(detail.RespBody), "tls-intercepted")
 	}
 }

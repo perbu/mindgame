@@ -348,11 +348,16 @@ func TestMITMInterception(t *testing.T) {
 	if e.Method != "GET" {
 		t.Errorf("audit method = %q, want GET", e.Method)
 	}
-	if string(e.RespBody) != "secret-mitm-content" {
-		t.Errorf("audit resp_body = %q, want %q", string(e.RespBody), "secret-mitm-content")
-	}
 	if e.Reason != "mitm test" {
 		t.Errorf("audit reason = %q, want %q", e.Reason, "mitm test")
+	}
+	// Bodies are only available via GetAuditEntry (list queries omit BLOBs).
+	detail, err := h.store.GetAuditEntry(e.ID)
+	if err != nil {
+		t.Fatalf("GetAuditEntry: %v", err)
+	}
+	if string(detail.RespBody) != "secret-mitm-content" {
+		t.Errorf("audit resp_body = %q, want %q", string(detail.RespBody), "secret-mitm-content")
 	}
 }
 

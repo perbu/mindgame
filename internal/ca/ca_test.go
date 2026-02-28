@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func tempCA(t *testing.T) *CA {
@@ -129,6 +130,43 @@ func TestMintCertificateCache(t *testing.T) {
 
 	if cert1 != cert2 {
 		t.Error("cache miss: got different pointers for same host")
+	}
+}
+
+func TestMintCertificateExpiredCacheEviction(t *testing.T) {
+	authority := tempCA(t)
+
+	// Mint a valid cert and cache it.
+	cert1, err := authority.MintCertificate("expiry-test.example.com")
+	if err != nil {
+		t.Fatalf("first mint: %v", err)
+	}
+
+	// Manually store a near-expiry cert in the cache.
+	expiredCert := &tls.Certificate{
+		Certificate: cert1.Certificate,
+		PrivateKey:  cert1.PrivateKey,
+		Leaf: &x509.Certificate{
+			NotAfter: time.Now().Add(30 * time.Minute), // less than 1 hour → should be evicted
+		},
+	}
+	authority.cache.Store("expiry-test.example.com", expiredCert)
+
+	// MintCertificate should regenerate because the cached cert is near-expiry.
+	cert2, err := authority.MintCertificate("expiry-test.example.com")
+	if err != nil {
+		t.Fatalf("second mint: %v", err)
+	}
+
+	if cert2 == expiredCert {
+		t.Error("expected new cert, got the near-expiry cached cert")
+	}
+	// New cert should have NotAfter > 1 hour from now.
+	if cert2.Leaf == nil {
+		t.Fatal("new cert has nil Leaf")
+	}
+	if time.Until(cert2.Leaf.NotAfter) <= 1*time.Hour {
+		t.Errorf("new cert NotAfter too soon: %v", cert2.Leaf.NotAfter)
 	}
 }
 

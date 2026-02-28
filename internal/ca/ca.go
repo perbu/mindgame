@@ -50,9 +50,14 @@ func (c *CA) CertPEM() []byte {
 
 // MintCertificate returns a TLS certificate for the given host, signed by the CA.
 // Results are cached so repeated calls for the same host return the same cert.
+// Expired or near-expiry cached certs are regenerated automatically.
 func (c *CA) MintCertificate(host string) (*tls.Certificate, error) {
 	if cached, ok := c.cache.Load(host); ok {
-		return cached.(*tls.Certificate), nil
+		tlsCert := cached.(*tls.Certificate)
+		if tlsCert.Leaf != nil && time.Until(tlsCert.Leaf.NotAfter) > 1*time.Hour {
+			return tlsCert, nil
+		}
+		c.cache.Delete(host)
 	}
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

@@ -222,12 +222,18 @@ func (h *Handler) scoreResponse(host, reqURL string, statusCode int, buf *Buffer
 		}
 	}
 
+	// Use decompressed body for scoring if available, otherwise the raw body.
+	scoringBody := buf.FullBody
+	if buf.Decompressed != nil {
+		scoringBody = buf.Decompressed
+	}
+
 	return h.respScorer.Load().EvalResponse(scoring.ResponseVars{
 		Host:        host,
 		URL:         reqURL,
 		StatusCode:  statusCode,
-		Body:        string(buf.FullBody),
-		BodySize:    int(buf.FullSize),
+		Body:        string(scoringBody),
+		BodySize:    len(scoringBody),
 		ContentType: respHeaders.Get("Content-Type"),
 		Headers:     headers,
 	})
@@ -332,15 +338,40 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("upstream response", "status", resp.StatusCode, "url", r.URL.String())
 
+	// If Content-Length is known and exceeds the buffer, stream directly — skip response scoring.
+	contentType := resp.Header.Get("Content-Type")
+	contentEncoding := resp.Header.Get("Content-Encoding")
+	if resp.ContentLength > 0 && resp.ContentLength > maxResponseBuffer {
+		slog.Debug("response too large to buffer, streaming", "host", r.URL.Hostname(), "content_length", resp.ContentLength)
+		for key, vals := range resp.Header {
+			for _, v := range vals {
+				w.Header().Add(key, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		logged, fullSize, streamErr := CaptureResponseBody(resp.Body, contentType, h.limits, w)
+		if streamErr != nil {
+			slog.Error("response streaming error", "error", streamErr)
+		}
+		h.logActionWithResp(r, "ALLOW", sr, scoring.Result{}, cap.Logged, cap.FullSize,
+			resp.StatusCode, logged, fullSize)
+		return
+	}
+
 	// Buffer response body for scoring before forwarding.
-	buf, err := BufferResponseBody(resp.Body, resp.Header.Get("Content-Type"), h.limits)
+	buf, err := BufferResponseBody(resp.Body, contentType, contentEncoding, h.limits)
 	if err != nil {
 		http.Error(w, "failed to read response body", http.StatusBadGateway)
 		return
 	}
 
-	// Score the response.
-	rsr := h.scoreResponse(r.URL.Hostname(), r.URL.String(), resp.StatusCode, buf, resp.Header)
+	// If truncated (unknown Content-Length that exceeded the buffer), skip response scoring.
+	var rsr scoring.Result
+	if buf.Truncated {
+		slog.Warn("response body truncated, skipping response scoring", "host", r.URL.Hostname())
+	} else {
+		rsr = h.scoreResponse(r.URL.Hostname(), r.URL.String(), resp.StatusCode, buf, resp.Header)
+	}
 	combined := sr.Score + rsr.Score
 	slog.Debug("response scored", "host", r.URL.Hostname(), "req_score", sr.Score,
 		"resp_score", rsr.Score, "combined", combined, "resp_signals", rsr.Signals)
@@ -545,15 +576,46 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// If Content-Length is known and exceeds the buffer, stream directly — skip response scoring.
+		contentType := resp.Header.Get("Content-Type")
+		contentEncoding := resp.Header.Get("Content-Encoding")
+		if resp.ContentLength > 0 && resp.ContentLength > maxResponseBuffer {
+			slog.Debug("tunnel response too large to buffer, streaming", "host", hostname, "content_length", resp.ContentLength)
+			resp.Write(tlsConn)
+			reqHeaders, _ := json.Marshal(req.Header)
+			entry := &db.AuditEntry{
+				Timestamp:       time.Now(),
+				Method:          req.Method,
+				URL:             req.URL.String(),
+				Host:            req.URL.Hostname(),
+				Reason:          req.Header.Get("X-Reason"),
+				ReqHeaders:      string(reqHeaders),
+				ReqBody:         cap.Logged,
+				ReqBodySize:     cap.FullSize,
+				RespStatus:      resp.StatusCode,
+				RespBodySize:    resp.ContentLength,
+				RiskScore:       sr.Score,
+				RiskSignals:     sr.SignalsJSON(),
+				Action:          "ALLOW",
+			}
+			h.insertAndNotify(entry)
+			continue
+		}
+
 		// Buffer response body for scoring.
-		buf, err := BufferResponseBody(resp.Body, resp.Header.Get("Content-Type"), h.limits)
+		buf, err := BufferResponseBody(resp.Body, contentType, contentEncoding, h.limits)
 		if err != nil {
 			writeErrorResponse(tlsConn, http.StatusBadGateway, "failed to read response body")
 			continue
 		}
 
-		// Score the response.
-		rsr := h.scoreResponse(req.URL.Hostname(), req.URL.String(), resp.StatusCode, buf, resp.Header)
+		// Score the response (skip if truncated).
+		var rsr scoring.Result
+		if buf.Truncated {
+			slog.Warn("tunnel response body truncated, skipping response scoring", "host", hostname)
+		} else {
+			rsr = h.scoreResponse(req.URL.Hostname(), req.URL.String(), resp.StatusCode, buf, resp.Header)
+		}
 		combined := sr.Score + rsr.Score
 		slog.Debug("tunnel response scored", "host", hostname, "req_score", sr.Score,
 			"resp_score", rsr.Score, "combined", combined)

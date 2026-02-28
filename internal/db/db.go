@@ -110,7 +110,24 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE audit_log ADD COLUMN resp_risk_score INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE audit_log ADD COLUMN resp_risk_signals TEXT NOT NULL DEFAULT '[]'`,
 	} {
-		_, _ = db.Exec(stmt)
+		if _, err := db.Exec(stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				db.Close()
+				return nil, fmt.Errorf("db.Open: migrate: %w", err)
+			}
+		}
+	}
+
+	// Indexes for common query patterns (idempotent).
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_host ON audit_log(host)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("db.Open: create index: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -131,6 +148,10 @@ func (s *Store) InsertAuditEntry(e *AuditEntry) error {
 	if respBody == nil {
 		respBody = []byte{}
 	}
+	riskSignals := e.RiskSignals
+	if riskSignals == "" {
+		riskSignals = "[]"
+	}
 	respRiskSignals := e.RespRiskSignals
 	if respRiskSignals == "" {
 		respRiskSignals = "[]"
@@ -139,7 +160,7 @@ func (s *Store) InsertAuditEntry(e *AuditEntry) error {
 		INSERT INTO audit_log (timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.Timestamp, e.Method, e.URL, e.Host, e.Reason, e.ReqHeaders, reqBody, e.ReqBodySize,
-		e.RespStatus, respBody, e.RespBodySize, e.RiskScore, e.RiskSignals, e.RespRiskScore, respRiskSignals, e.Action,
+		e.RespStatus, respBody, e.RespBodySize, e.RiskScore, riskSignals, e.RespRiskScore, respRiskSignals, e.Action,
 	)
 	if err != nil {
 		return err
@@ -153,9 +174,10 @@ func (s *Store) InsertAuditEntry(e *AuditEntry) error {
 }
 
 // ListAuditEntries returns the most recent audit log entries, up to limit.
+// Bodies are omitted to avoid loading large BLOBs; use GetAuditEntry for full detail.
 func (s *Store) ListAuditEntries(limit int) ([]AuditEntry, error) {
 	rows, err := s.db.Query(`
-		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body_size, resp_status, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action
 		FROM audit_log
 		ORDER BY id DESC
 		LIMIT ?`, limit)
@@ -168,7 +190,7 @@ func (s *Store) ListAuditEntries(limit int) ([]AuditEntry, error) {
 	for rows.Next() {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
-			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
+			&e.ReqHeaders, &e.ReqBodySize, &e.RespStatus, &e.RespBodySize,
 			&e.RiskScore, &e.RiskSignals, &e.RespRiskScore, &e.RespRiskSignals, &e.Action); err != nil {
 			return nil, err
 		}
@@ -462,7 +484,7 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 		args = append(args, f.AfterID)
 	}
 
-	query := `SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action FROM audit_log`
+	query := `SELECT id, timestamp, method, url, host, reason, req_headers, req_body_size, resp_status, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action FROM audit_log`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -485,7 +507,7 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 	for rows.Next() {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
-			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
+			&e.ReqHeaders, &e.ReqBodySize, &e.RespStatus, &e.RespBodySize,
 			&e.RiskScore, &e.RiskSignals, &e.RespRiskScore, &e.RespRiskSignals, &e.Action); err != nil {
 			return nil, err
 		}

@@ -2,6 +2,7 @@ package scoring
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/google/cel-go/cel"
@@ -47,10 +48,9 @@ type Engine struct {
 	rules []compiledRule
 }
 
-// New compiles the enabled scoring rules into a CEL engine.
-// Returns an error if any enabled rule has invalid CEL syntax.
-func New(rules []db.ScoringRule) (*Engine, error) {
-	env, err := cel.NewEnv(
+// requestEnv returns the CEL environment for request scoring rules.
+func requestEnv() (*cel.Env, error) {
+	return cel.NewEnv(
 		cel.Variable("method", cel.StringType),
 		cel.Variable("url", cel.StringType),
 		cel.Variable("host", cel.StringType),
@@ -61,6 +61,12 @@ func New(rules []db.ScoringRule) (*Engine, error) {
 		cel.Variable("headers", cel.MapType(cel.StringType, cel.StringType)),
 		cel.Variable("reason", cel.StringType),
 	)
+}
+
+// New compiles the enabled scoring rules into a CEL engine.
+// Returns an error if any enabled rule has invalid CEL syntax or non-bool output.
+func New(rules []db.ScoringRule) (*Engine, error) {
+	env, err := requestEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -73,6 +79,9 @@ func New(rules []db.ScoringRule) (*Engine, error) {
 		ast, issues := env.Compile(r.Expr)
 		if issues != nil && issues.Err() != nil {
 			return nil, issues.Err()
+		}
+		if ast.OutputType() != cel.BoolType {
+			return nil, fmt.Errorf("rule %q: expression must return bool, got %s", r.Name, ast.OutputType())
 		}
 		prog, err := env.Program(ast, cel.EvalOptions(cel.OptOptimize))
 		if err != nil {
@@ -87,6 +96,22 @@ func New(rules []db.ScoringRule) (*Engine, error) {
 
 	slog.Debug("scoring engine compiled", "rules", len(compiled))
 	return &Engine{rules: compiled}, nil
+}
+
+// ValidateRequestExpr checks that an expression is valid CEL that returns bool.
+func ValidateRequestExpr(expr string) error {
+	env, err := requestEnv()
+	if err != nil {
+		return err
+	}
+	ast, issues := env.Compile(expr)
+	if issues != nil && issues.Err() != nil {
+		return issues.Err()
+	}
+	if ast.OutputType() != cel.BoolType {
+		return fmt.Errorf("expression must return bool, got %s", ast.OutputType())
+	}
+	return nil
 }
 
 // Eval evaluates all compiled rules against the given request variables.

@@ -78,6 +78,13 @@ func TestInsertAndListAuditEntries(t *testing.T) {
 	if got.RespStatus != 200 {
 		t.Errorf("resp_status = %d, want %d", got.RespStatus, 200)
 	}
+	// List queries omit bodies.
+	if got.ReqBody != nil {
+		t.Errorf("ReqBody should be nil in list query, got %d bytes", len(got.ReqBody))
+	}
+	if got.RespBody != nil {
+		t.Errorf("RespBody should be nil in list query, got %d bytes", len(got.RespBody))
+	}
 }
 
 func TestInsertAndLookupDomainRule(t *testing.T) {
@@ -702,6 +709,52 @@ func TestParseSignals(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEmptyRiskSignalsStats(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	// Insert entry with empty RiskSignals (should be normalized to "[]").
+	entry := &AuditEntry{
+		Timestamp:   time.Now(),
+		Method:      "GET",
+		URL:         "http://example.com",
+		Host:        "example.com",
+		Action:      "ALLOW",
+		RiskSignals: "", // empty — would break json_each without normalization
+	}
+	if err := store.InsertAuditEntry(entry); err != nil {
+		t.Fatalf("InsertAuditEntry: %v", err)
+	}
+
+	// GetAuditStats should not error (json_each on "[]" is fine).
+	stats, err := store.GetAuditStats(time.Hour)
+	if err != nil {
+		t.Fatalf("GetAuditStats: %v", err)
+	}
+	if stats.TotalLastMinute != 1 {
+		t.Errorf("total = %d, want 1", stats.TotalLastMinute)
+	}
+}
+
+func TestOpenIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store1, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	store1.Close()
+
+	// Second open on same path should succeed (migrations are idempotent).
+	store2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	store2.Close()
 }
 
 func TestInsertAndListResponseScoringRules(t *testing.T) {

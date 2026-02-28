@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"strings"
@@ -146,23 +149,63 @@ func ResponseCaptureLimit(contentType string, limits BodyLimits) int {
 // maxResponseBuffer is the hard cap for buffering response bodies (10MB).
 const maxResponseBuffer = 10 << 20
 
+// DecompressBody decompresses gzip or deflate data, returning the original
+// data unchanged on unknown encoding or decompression error.
+func DecompressBody(data []byte, contentEncoding string) []byte {
+	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
+	case "gzip":
+		r, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			slog.Debug("gzip decompression failed", "error", err)
+			return data
+		}
+		defer r.Close()
+		decoded, err := io.ReadAll(io.LimitReader(r, maxResponseBuffer))
+		if err != nil {
+			slog.Debug("gzip read failed", "error", err)
+			return data
+		}
+		return decoded
+	case "deflate":
+		r := flate.NewReader(bytes.NewReader(data))
+		defer r.Close()
+		decoded, err := io.ReadAll(io.LimitReader(r, maxResponseBuffer))
+		if err != nil {
+			slog.Debug("deflate decompression failed", "error", err)
+			return data
+		}
+		return decoded
+	default:
+		return data
+	}
+}
+
 // BufferedResponse holds a fully buffered response body for scoring and forwarding.
 type BufferedResponse struct {
-	Logged   []byte // portion saved for audit logging
-	FullBody []byte // complete body for forwarding
-	FullSize int64  // total body size
-	IsBinary bool   // whether the body is binary content
+	Logged       []byte // portion saved for audit logging
+	FullBody     []byte // complete body for forwarding (original, possibly compressed)
+	Decompressed []byte // decompressed body for scoring (nil if not compressed)
+	FullSize     int64  // total body size
+	IsBinary     bool   // whether the body is binary content
+	Truncated    bool   // whether the body exceeded maxResponseBuffer
 }
 
 // BufferResponseBody reads the entire response body into memory (up to 10MB)
-// so it can be scored before forwarding. Returns the logged portion for audit,
-// the full body for forwarding, and the total size.
-func BufferResponseBody(body io.ReadCloser, contentType string, limits BodyLimits) (*BufferedResponse, error) {
+// so it can be scored before forwarding. contentEncoding is used to decompress
+// for scoring while preserving the original bytes for forwarding.
+func BufferResponseBody(body io.ReadCloser, contentType string, contentEncoding string, limits BodyLimits) (*BufferedResponse, error) {
 	defer body.Close()
 
-	fullBody, err := io.ReadAll(io.LimitReader(body, maxResponseBuffer))
+	// Read maxResponseBuffer+1 to detect truncation.
+	fullBody, err := io.ReadAll(io.LimitReader(body, maxResponseBuffer+1))
 	if err != nil {
 		return nil, err
+	}
+
+	truncated := false
+	if len(fullBody) > maxResponseBuffer {
+		fullBody = fullBody[:maxResponseBuffer]
+		truncated = true
 	}
 
 	isBin := isBinaryContentType(contentType)
@@ -176,11 +219,19 @@ func BufferResponseBody(body io.ReadCloser, contentType string, limits BodyLimit
 		logged = logged[:logLimit]
 	}
 
+	var decompressed []byte
+	ce := strings.ToLower(strings.TrimSpace(contentEncoding))
+	if ce == "gzip" || ce == "deflate" {
+		decompressed = DecompressBody(fullBody, contentEncoding)
+	}
+
 	return &BufferedResponse{
-		Logged:   logged,
-		FullBody: fullBody,
-		FullSize: int64(len(fullBody)),
-		IsBinary: isBin,
+		Logged:       logged,
+		FullBody:     fullBody,
+		Decompressed: decompressed,
+		FullSize:     int64(len(fullBody)),
+		IsBinary:     isBin,
+		Truncated:    truncated,
 	}, nil
 }
 

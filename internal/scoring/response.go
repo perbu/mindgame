@@ -1,6 +1,7 @@
 package scoring
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/google/cel-go/cel"
@@ -18,9 +19,9 @@ type ResponseVars struct {
 	Headers     map[string]string
 }
 
-// NewResponse compiles response scoring rules into a CEL engine.
-func NewResponse(rules []db.ScoringRule) (*Engine, error) {
-	env, err := cel.NewEnv(
+// responseEnv returns the CEL environment for response scoring rules.
+func responseEnv() (*cel.Env, error) {
+	return cel.NewEnv(
 		cel.Variable("host", cel.StringType),
 		cel.Variable("url", cel.StringType),
 		cel.Variable("status_code", cel.IntType),
@@ -29,6 +30,11 @@ func NewResponse(rules []db.ScoringRule) (*Engine, error) {
 		cel.Variable("content_type", cel.StringType),
 		cel.Variable("headers", cel.MapType(cel.StringType, cel.StringType)),
 	)
+}
+
+// NewResponse compiles response scoring rules into a CEL engine.
+func NewResponse(rules []db.ScoringRule) (*Engine, error) {
+	env, err := responseEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -41,6 +47,9 @@ func NewResponse(rules []db.ScoringRule) (*Engine, error) {
 		ast, issues := env.Compile(r.Expr)
 		if issues != nil && issues.Err() != nil {
 			return nil, issues.Err()
+		}
+		if ast.OutputType() != cel.BoolType {
+			return nil, fmt.Errorf("rule %q: expression must return bool, got %s", r.Name, ast.OutputType())
 		}
 		prog, err := env.Program(ast, cel.EvalOptions(cel.OptOptimize))
 		if err != nil {
@@ -55,6 +64,22 @@ func NewResponse(rules []db.ScoringRule) (*Engine, error) {
 
 	slog.Debug("response scoring engine compiled", "rules", len(compiled))
 	return &Engine{rules: compiled}, nil
+}
+
+// ValidateResponseExpr checks that an expression is valid CEL that returns bool.
+func ValidateResponseExpr(expr string) error {
+	env, err := responseEnv()
+	if err != nil {
+		return err
+	}
+	ast, issues := env.Compile(expr)
+	if issues != nil && issues.Err() != nil {
+		return issues.Err()
+	}
+	if ast.OutputType() != cel.BoolType {
+		return fmt.Errorf("expression must return bool, got %s", ast.OutputType())
+	}
+	return nil
 }
 
 // EvalResponse evaluates all compiled rules against the given response variables.
@@ -115,14 +140,14 @@ func DefaultResponseRules() []db.ScoringRule {
 		},
 		{
 			Name:    "resp_hidden_text",
-			Expr:    `body.matches("(?i)(display:\\s*none|visibility:\\s*hidden|font-size:\\s*0|color:\\s*transparent)") || body.matches("<!--.{500,}-->")`,
+			Expr:    `body.matches("(?i)(display:\\s*none|visibility:\\s*hidden|font-size:\\s*0|color:\\s*transparent)") || body.matches("(?s)<!--.{500,}-->")`,
 			Points:  5,
 			Enabled: true,
 			Note:    "Response contains hidden text via CSS or oversized HTML comments",
 		},
 		{
 			Name:    "resp_large_encoded_payload",
-			Expr:    `body_size > 10000 && body.matches("[A-Za-z0-9+/=]{500,}")`,
+			Expr:    `body_size > 10000 && body.matches("[A-Za-z0-9+/=\\s]{500,}")`,
 			Points:  5,
 			Enabled: true,
 			Note:    "Large response with long base64-encoded payload",

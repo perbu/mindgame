@@ -7,6 +7,37 @@ import (
 	"github.com/perbu/mindgame/internal/db"
 )
 
+func TestNewResponseRejectsNonBoolExpr(t *testing.T) {
+	rules := []db.ScoringRule{
+		{Name: "int_return", Expr: `body_size + 10`, Points: 1, Enabled: true},
+	}
+	_, err := NewResponse(rules)
+	if err == nil {
+		t.Fatal("expected error for non-bool CEL expression")
+	}
+	if !strings.Contains(err.Error(), "must return bool") {
+		t.Errorf("error = %q, want 'must return bool'", err)
+	}
+}
+
+func TestValidateResponseExpr(t *testing.T) {
+	if err := ValidateResponseExpr(`status_code >= 500`); err != nil {
+		t.Errorf("valid expr failed: %v", err)
+	}
+
+	if err := ValidateResponseExpr(`bad syntax!!!`); err == nil {
+		t.Error("expected error for invalid syntax")
+	}
+
+	err := ValidateResponseExpr(`body_size + 10`)
+	if err == nil {
+		t.Error("expected error for non-bool return")
+	}
+	if err != nil && !strings.Contains(err.Error(), "must return bool") {
+		t.Errorf("error = %q, want 'must return bool'", err)
+	}
+}
+
 func TestNewResponseInvalidExpr(t *testing.T) {
 	rules := []db.ScoringRule{
 		{Name: "bad", Expr: `this is not valid CEL !!!`, Points: 1, Enabled: true},

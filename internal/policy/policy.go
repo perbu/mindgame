@@ -33,6 +33,7 @@ type Cache struct {
 	mu       sync.RWMutex
 	rules    map[string]Tier
 	stopCh   chan struct{}
+	stopOnce sync.Once
 	interval time.Duration
 }
 
@@ -85,9 +86,11 @@ func (c *Cache) Reload() error {
 	return nil
 }
 
-// Stop stops the background reload goroutine.
+// Stop stops the background reload goroutine. Safe to call multiple times.
 func (c *Cache) Stop() {
-	close(c.stopCh)
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 }
 
 // Evaluate returns the policy decision for the given host.
