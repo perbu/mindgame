@@ -56,11 +56,35 @@ templ FeedPage(entries []db.AuditEntry) {
 				</tbody>
 			</table>
 		</div>
+		<script>
+			function toggleDetail(row) {
+				var detailRow = row.nextElementSibling;
+				if (!detailRow || !detailRow.classList.contains("detail-row")) return;
+				// First click: htmx is loading content, let afterSwap handle it
+				if (detailRow.innerHTML.trim() === "") return;
+				// Toggle visibility
+				if (detailRow.style.display === "table-row") {
+					detailRow.style.display = "none";
+					row.classList.remove("expanded");
+				} else {
+					detailRow.style.display = "table-row";
+					row.classList.add("expanded");
+				}
+			}
+
+			document.body.addEventListener("htmx:afterSwap", function(evt) {
+				var detailRow = evt.detail.target;
+				if (!detailRow.classList.contains("detail-row")) return;
+				detailRow.style.display = "table-row";
+				var parentRow = detailRow.previousElementSibling;
+				if (parentRow) parentRow.classList.add("expanded");
+			});
+		</script>
 	}
 }
 
 templ FeedRow(e db.AuditEntry) {
-	<tr id={ fmt.Sprintf("row-%d", e.ID) } hx-get={ fmt.Sprintf("/feed/detail/%d", e.ID) } hx-target={ fmt.Sprintf("#detail-%d", e.ID) } hx-swap="innerHTML" style="cursor:pointer">
+	<tr id={ fmt.Sprintf("row-%d", e.ID) } hx-get={ fmt.Sprintf("/feed/detail/%d", e.ID) } hx-target={ fmt.Sprintf("#detail-%d", e.ID) } hx-swap="innerHTML" hx-trigger="click once" onclick="toggleDetail(this)" style="cursor:pointer">
 		<td class="mono">{ fmt.Sprintf("%d", e.ID) }</td>
 		<td class="mono">{ e.Timestamp.Format("15:04:05") }</td>
 		<td><span class={ actionBadgeClass(e.Action) }>{ e.Action }</span></td>
@@ -70,7 +94,7 @@ templ FeedRow(e db.AuditEntry) {
 		<td><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></td>
 		<td class="truncate" title={ e.Reason }>{ e.Reason }</td>
 	</tr>
-	<tr id={ fmt.Sprintf("detail-%d", e.ID) } style="display:none"></tr>
+	<tr id={ fmt.Sprintf("detail-%d", e.ID) } class="detail-row"></tr>
 }
 
 templ FeedDetail(e *db.AuditEntry) {

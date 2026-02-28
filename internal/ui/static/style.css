@@ -258,6 +258,10 @@ button:hover, .btn:hover { opacity: 0.9; }
 .btn-danger { background: var(--red); }
 .btn-secondary { background: var(--bg-input); color: var(--text); border: 1px solid var(--border); }
 
+/* Detail row (hidden by default, toggled via JS) */
+.detail-row { display: none; }
+tr.expanded { background: rgba(108, 140, 255, 0.08); }
+
 /* Detail panel */
 .detail {
     padding: 0.75rem;

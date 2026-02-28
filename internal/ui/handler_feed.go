@@ -1,11 +1,11 @@
 package ui
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/perbu/mindgame/internal/ui/templates"
 )
@@ -42,7 +42,7 @@ func (s *Server) handleFeedSSE(w http.ResponseWriter, r *http.Request) {
 				slog.Error("SSE render error", "error", err)
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", jsonEscapeSSE(html))
+			fmt.Fprintf(w, "data: %s\n\n", sseStripNewlines(html))
 			flusher.Flush()
 		case <-r.Context().Done():
 			slog.Debug("SSE feed client disconnected")
@@ -72,9 +72,7 @@ func (s *Server) handleFeedDetail(w http.ResponseWriter, r *http.Request) {
 	templates.FeedDetail(entry).Render(r.Context(), w)
 }
 
-// jsonEscapeSSE escapes newlines so multi-line HTML can be sent as a single SSE data field.
-func jsonEscapeSSE(s string) string {
-	b, _ := json.Marshal(s)
-	// Strip surrounding quotes.
-	return string(b[1 : len(b)-1])
+// sseStripNewlines removes newlines so multi-line HTML can be sent as a single SSE data field.
+func sseStripNewlines(s string) string {
+	return strings.ReplaceAll(s, "\n", "")
 }
