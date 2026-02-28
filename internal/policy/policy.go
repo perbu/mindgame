@@ -3,6 +3,7 @@ package policy
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -59,7 +60,7 @@ func (c *Cache) loop() {
 		case <-ticker.C:
 			if err := c.Reload(); err != nil {
 				// Log but don't crash; keep serving stale data.
-				fmt.Fprintf(os.Stderr, "policy reload error: %v\n", err)
+				slog.Error("policy reload error", "error", err)
 			}
 		case <-c.stopCh:
 			return
@@ -80,6 +81,7 @@ func (c *Cache) Reload() error {
 	c.mu.Lock()
 	c.rules = m
 	c.mu.Unlock()
+	slog.Debug("policy cache reloaded", "rules", len(m))
 	return nil
 }
 
@@ -95,8 +97,10 @@ func (c *Cache) Evaluate(host string) Decision {
 	c.mu.RUnlock()
 
 	if !ok {
+		slog.Debug("policy evaluated", "host", host, "tier", "default")
 		return Decision{Tier: TierDefault, RequireReason: true}
 	}
+	slog.Debug("policy evaluated", "host", host, "tier", string(tier))
 	switch tier {
 	case TierDeny:
 		return Decision{Tier: TierDeny, RequireReason: false}

@@ -3,7 +3,7 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 )
 
@@ -30,6 +30,7 @@ type dreamEvent struct {
 }
 
 func (s *Server) handleDreamEvents(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("dream SSE client connected")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -72,13 +73,14 @@ func (s *Server) handleDreamEvents(w http.ResponseWriter, r *http.Request) {
 
 			data, err := json.Marshal(ev)
 			if err != nil {
-				log.Printf("dream SSE marshal error: %v", err)
+				slog.Error("dream SSE marshal error", "error", err)
 				return
 			}
 
 			fmt.Fprintf(w, "event: audit\ndata: %s\n\n", data)
 			flusher.Flush()
 		case <-r.Context().Done():
+			slog.Debug("dream SSE client disconnected")
 			return
 		}
 	}

@@ -2,7 +2,7 @@ package scoring
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 
 	"github.com/google/cel-go/cel"
 	"github.com/perbu/mindgame/internal/db"
@@ -85,6 +85,7 @@ func New(rules []db.ScoringRule) (*Engine, error) {
 		})
 	}
 
+	slog.Debug("scoring engine compiled", "rules", len(compiled))
 	return &Engine{rules: compiled}, nil
 }
 
@@ -112,10 +113,11 @@ func (e *Engine) Eval(vars RequestVars) Result {
 	for _, r := range e.rules {
 		out, _, err := r.prog.Eval(activation)
 		if err != nil {
-			log.Printf("scoring rule %q eval error: %v", r.name, err)
+			slog.Warn("scoring rule eval error", "rule", r.name, "error", err)
 			continue
 		}
 		if out.Value() == true {
+			slog.Debug("scoring rule matched", "rule", r.name, "points", r.points)
 			result.Score += r.points
 			result.Signals = append(result.Signals, r.name)
 		}

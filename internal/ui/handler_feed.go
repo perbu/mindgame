@@ -3,7 +3,7 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -20,6 +20,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFeedSSE(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("SSE feed client connected")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -38,12 +39,13 @@ func (s *Server) handleFeedSSE(w http.ResponseWriter, r *http.Request) {
 		case entry := <-ch:
 			html, err := renderToString(r.Context(), templates.FeedRow(*entry))
 			if err != nil {
-				log.Printf("SSE render error: %v", err)
+				slog.Error("SSE render error", "error", err)
 				return
 			}
 			fmt.Fprintf(w, "data: %s\n\n", jsonEscapeSSE(html))
 			flusher.Flush()
 		case <-r.Context().Done():
+			slog.Debug("SSE feed client disconnected")
 			return
 		}
 	}

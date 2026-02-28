@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -84,6 +84,7 @@ func (h *Handler) SetTransport(rt http.RoundTripper) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("incoming request", "method", r.Method, "url", r.URL.String())
 	// Direct (non-proxied) requests have a relative URL. Serve the CA
 	// certificate so agents can bootstrap trust without out-of-band setup.
 	if !r.URL.IsAbs() && r.URL.Path == "/ca.pem" {
@@ -129,6 +130,7 @@ func (h *Handler) doUpstream(r *http.Request, body io.Reader, contentLength int6
 		outReq.ContentLength = contentLength
 	}
 
+	slog.Debug("forwarding upstream", "method", r.Method, "url", r.URL.String())
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
 		return nil, fmt.Errorf("upstream error: %w", err)
@@ -154,7 +156,7 @@ func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, r
 		Action:      action,
 	}
 	if err := h.store.InsertAuditEntry(entry); err != nil {
-		log.Printf("audit log error: %v", err)
+		slog.Error("audit log error", "error", err)
 	} else if h.notifier != nil {
 		h.notifier.Publish(entry)
 	}
@@ -163,7 +165,7 @@ func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, r
 // insertAndNotify inserts an audit entry and notifies subscribers.
 func (h *Handler) insertAndNotify(entry *db.AuditEntry) {
 	if err := h.store.InsertAuditEntry(entry); err != nil {
-		log.Printf("audit log error: %v", err)
+		slog.Error("audit log error", "error", err)
 	} else if h.notifier != nil {
 		h.notifier.Publish(entry)
 	}
@@ -202,6 +204,7 @@ func (h *Handler) scoreRequest(r *http.Request, cap *CapturedBody) scoring.Resul
 
 func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	decision := h.policy.Evaluate(r.URL.Hostname())
+	slog.Debug("policy evaluated", "host", r.URL.Hostname(), "tier", string(decision.Tier))
 	var zeroResult scoring.Result
 
 	switch decision.Tier {
@@ -228,6 +231,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 
 	sr := h.scoreRequest(r, cap)
+	slog.Debug("request scored", "host", r.URL.Hostname(), "score", sr.Score, "signals", sr.Signals)
 
 	if decision.Tier == policy.TierDefault {
 		if sr.Score >= 20 {
@@ -239,10 +243,10 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				CreatedAt: time.Now(),
 				Note:      "auto-banned by scoring engine",
 			}); err != nil {
-				log.Printf("failed to insert ban rule: %v", err)
+				slog.Error("failed to insert ban rule", "error", err)
 			}
 			if err := h.policy.Reload(); err != nil {
-				log.Printf("policy reload after ban: %v", err)
+				slog.Error("policy reload after ban", "error", err)
 			}
 			h.logAction(r, "BAN", sr, cap.Logged, cap.FullSize)
 			http.Error(w, "request banned by scoring engine", http.StatusForbidden)
@@ -262,6 +266,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	slog.Debug("upstream response", "status", resp.StatusCode, "url", r.URL.String())
 
 	// Write response headers.
 	for key, vals := range resp.Header {
@@ -274,7 +279,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Stream response body to client while capturing log portion.
 	respLogged, respFullSize, err := CaptureResponseBody(resp.Body, resp.Header.Get("Content-Type"), h.limits, w)
 	if err != nil {
-		log.Printf("response streaming error: %v", err)
+		slog.Error("response streaming error", "error", err)
 	}
 
 	// Create audit entry.
@@ -299,6 +304,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("CONNECT tunnel", "host", r.Host)
 	// Keep the full host:port for outbound requests.
 	targetHost := r.Host
 
@@ -312,6 +318,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Check deny before hijacking — we can still use http.Error.
 	decision := h.policy.Evaluate(hostname)
+	slog.Debug("tunnel policy evaluated", "host", hostname, "tier", string(decision.Tier))
 	if decision.Tier == policy.TierDeny {
 		// Build a synthetic request for logging.
 		synth := &http.Request{
@@ -353,7 +360,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	tlsConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsConn.Handshake(); err != nil {
-		log.Printf("MITM TLS handshake failed for %s: %v", hostname, err)
+		slog.Error("MITM TLS handshake failed", "host", hostname, "error", err)
 		clientConn.Close()
 		return
 	}
@@ -365,7 +372,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !isConnClosed(err) {
-				log.Printf("MITM read request error for %s: %v", hostname, err)
+				slog.Warn("MITM read request error", "host", hostname, "error", err)
 			}
 			return
 		}
@@ -399,6 +406,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		req.Body.Close()
 
 		sr := h.scoreRequest(req, cap)
+		slog.Debug("tunnel request scored", "host", hostname, "method", req.Method, "url", req.URL.String(), "score", sr.Score)
 
 		if decision.Tier == policy.TierDefault {
 			if sr.Score >= 20 {
@@ -410,10 +418,10 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 					CreatedAt: time.Now(),
 					Note:      "auto-banned by scoring engine",
 				}); err != nil {
-					log.Printf("failed to insert ban rule: %v", err)
+					slog.Error("failed to insert ban rule", "error", err)
 				}
 				if err := h.policy.Reload(); err != nil {
-					log.Printf("policy reload after ban: %v", err)
+					slog.Error("policy reload after ban", "error", err)
 				}
 				h.logAction(req, "BAN", sr, cap.Logged, cap.FullSize)
 				writeErrorResponse(tlsConn, http.StatusForbidden, "request banned by scoring engine")

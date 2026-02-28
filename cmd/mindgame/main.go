@@ -4,7 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"flag"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,16 +26,34 @@ import (
 var version string
 
 func main() {
-	log.Printf("mindgame %s", strings.TrimSpace(version))
 	defaults := proxy.DefaultBodyLimits()
 	addr := flag.String("addr", ":8080", "listen address")
 	uiAddr := flag.String("ui-addr", ":9090", "UI dashboard listen address")
 	dbPath := flag.String("db", "audit.db", "path to SQLite database")
 	caDir := flag.String("ca-dir", ".", "directory for CA certificate and key")
 	seedPath := flag.String("seed", "", "path to seed file with domain rules")
+	logLevelStr := flag.String("log-level", "info", "log level (debug, info, warn, error)")
 	maxTextLog := flag.Int("max-text-log", defaults.MaxTextLog, "max bytes to log for text bodies")
 	maxBinaryLog := flag.Int("max-binary-log", defaults.MaxBinaryLog, "max bytes to log for binary bodies")
 	flag.Parse()
+
+	var logLevel slog.Level
+	switch strings.ToLower(*logLevelStr) {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		fmt.Fprintf(os.Stderr, "invalid log level %q, using info\n", *logLevelStr)
+		logLevel = slog.LevelInfo
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+
+	slog.Info("starting mindgame", "version", strings.TrimSpace(version))
 
 	limits := proxy.BodyLimits{
 		MaxTextLog:   *maxTextLog,
@@ -43,61 +62,74 @@ func main() {
 
 	store, err := db.Open(*dbPath)
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		slog.Error("failed to open database", "error", err)
+		os.Exit(1)
 	}
 	defer store.Close()
+	slog.Debug("database opened", "path", *dbPath)
 
 	certPath := filepath.Join(*caDir, "ca.pem")
 	keyPath := filepath.Join(*caDir, "ca.key")
 	authority, err := ca.New(certPath, keyPath)
 	if err != nil {
-		log.Fatalf("failed to initialize CA: %v", err)
+		slog.Error("failed to initialize CA", "error", err)
+		os.Exit(1)
 	}
-	log.Printf("CA cert: %s, key: %s", certPath, keyPath)
+	slog.Info("CA initialized", "cert", certPath, "key", keyPath)
 
 	if *seedPath != "" {
 		rules, err := policy.ParseSeedFile(*seedPath)
 		if err != nil {
-			log.Fatalf("failed to parse seed file: %v", err)
+			slog.Error("failed to parse seed file", "error", err)
+			os.Exit(1)
 		}
 		if err := store.InsertDomainRules(rules); err != nil {
-			log.Fatalf("failed to insert seed rules: %v", err)
+			slog.Error("failed to insert seed rules", "error", err)
+			os.Exit(1)
 		}
-		log.Printf("loaded %d domain rules from %s", len(rules), *seedPath)
+		slog.Info("loaded domain rules from seed file", "count", len(rules), "path", *seedPath)
 	}
 
 	pol, err := policy.NewCache(store, 30*time.Second)
 	if err != nil {
-		log.Fatalf("failed to create policy cache: %v", err)
+		slog.Error("failed to create policy cache", "error", err)
+		os.Exit(1)
 	}
 	defer pol.Stop()
+	slog.Debug("policy cache created", "interval", 30*time.Second)
 
 	count, err := store.CountScoringRules()
 	if err != nil {
-		log.Fatalf("failed to count scoring rules: %v", err)
+		slog.Error("failed to count scoring rules", "error", err)
+		os.Exit(1)
 	}
 	if count == 0 {
 		if err := store.InsertScoringRules(scoring.DefaultRules()); err != nil {
-			log.Fatalf("failed to seed scoring rules: %v", err)
+			slog.Error("failed to seed scoring rules", "error", err)
+			os.Exit(1)
 		}
-		log.Printf("seeded %d default scoring rules", len(scoring.DefaultRules()))
+		slog.Info("seeded default scoring rules", "count", len(scoring.DefaultRules()))
 	}
 
 	rules, err := store.ListScoringRules()
 	if err != nil {
-		log.Fatalf("failed to list scoring rules: %v", err)
+		slog.Error("failed to list scoring rules", "error", err)
+		os.Exit(1)
 	}
 	scorer, err := scoring.New(rules)
 	if err != nil {
-		log.Fatalf("failed to create scoring engine: %v", err)
+		slog.Error("failed to create scoring engine", "error", err)
+		os.Exit(1)
 	}
-	log.Printf("scoring engine loaded with %d rules", scorer.RuleCount())
+	slog.Info("scoring engine loaded", "rules", scorer.RuleCount())
 
 	handler := proxy.New(store, authority, pol, scorer, limits)
+	slog.Debug("proxy handler created")
 
 	// SSE broker connects proxy audit writes to the UI live feed.
 	broker := ui.NewBroker()
 	handler.SetNotifier(broker)
+	slog.Debug("SSE broker initialized")
 
 	// reloadScorer compiles scoring rules from DB and hot-swaps the proxy's engine.
 	reloadScorer := func() error {
@@ -125,32 +157,35 @@ func main() {
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
+	slog.Debug("signal handler registered")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		log.Printf("proxy listening on %s", *addr)
+		slog.Info("proxy listening", "addr", *addr)
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("proxy listen error: %v", err)
+			slog.Error("proxy listen error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	go func() {
-		log.Printf("UI dashboard listening on %s", *uiAddr)
+		slog.Info("UI dashboard listening", "addr", *uiAddr)
 		if err := uiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("UI listen error: %v", err)
+			slog.Error("UI listen error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down...")
+	slog.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := proxySrv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("proxy shutdown error: %v", err)
+		slog.Error("proxy shutdown error", "error", err)
 	}
 	if err := uiSrv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("UI shutdown error: %v", err)
+		slog.Error("UI shutdown error", "error", err)
 	}
 }
