@@ -71,6 +71,8 @@ deny evil.example.com
 
 Rules are stored in SQLite and editable via the web UI at `http://localhost:9090/domains`.
 
+> **Tip:** Allowlist your LLM provider (e.g., `api.anthropic.com`, `api.openai.com`). AI agents make frequent, large calls to model APIs — without an allow rule these will all be logged and scored, quickly filling up your audit database with uninteresting traffic.
+
 ## Scoring Rules
 
 Risk scoring uses [CEL](https://github.com/google/cel-spec) expressions stored in the database. Default rules flag sensitive paths, credential patterns, confidential keywords, and large outbound payloads. Add, edit, or disable rules via the web UI at `http://localhost:9090/scoring`.
