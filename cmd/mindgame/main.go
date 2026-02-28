@@ -35,6 +35,7 @@ func main() {
 	logLevelStr := flag.String("log-level", "info", "log level (debug, info, warn, error)")
 	maxTextLog := flag.Int("max-text-log", defaults.MaxTextLog, "max bytes to log for text bodies")
 	maxBinaryLog := flag.Int("max-binary-log", defaults.MaxBinaryLog, "max bytes to log for binary bodies")
+	retention := flag.Duration("retention", 0, "auto-delete audit entries older than this duration (0 = disabled)")
 	flag.Parse()
 
 	var logLevel slog.Level
@@ -205,6 +206,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Start audit log reaper if retention is configured.
+	if *retention > 0 {
+		slog.Info("audit log retention enabled", "retention", *retention)
+		go runReaper(ctx, store, *retention)
+	}
+
 	errCh := make(chan error, 2)
 	go func() {
 		slog.Info("proxy listening", "addr", *addr)
@@ -237,5 +244,30 @@ func main() {
 	}
 	if err := uiSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("UI shutdown error", "error", err)
+	}
+}
+
+// runReaper periodically deletes audit entries older than the retention period.
+func runReaper(ctx context.Context, store *db.Store, retention time.Duration) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-retention)
+			deleted, err := store.DeleteAuditEntriesBefore(cutoff, 10000)
+			if err != nil {
+				slog.Error("reaper: failed to delete old entries", "error", err)
+				continue
+			}
+			if deleted > 0 {
+				slog.Info("reaper: purged old audit entries", "deleted", deleted, "cutoff", cutoff)
+				if err := store.IncrementalVacuum(); err != nil {
+					slog.Error("reaper: incremental vacuum failed", "error", err)
+				}
+			}
+		}
 	}
 }

@@ -99,6 +99,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec("PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, err
@@ -742,4 +746,36 @@ func (s *Store) DeleteResponseScoringRule(name string) error {
 		return fmt.Errorf("response scoring rule %q not found", name)
 	}
 	return nil
+}
+
+// DeleteAuditEntriesBefore deletes audit entries older than the given time
+// in batches to avoid holding long write locks. Returns total rows deleted.
+func (s *Store) DeleteAuditEntriesBefore(t time.Time, batchSize int) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = 10000
+	}
+	var total int64
+	for {
+		res, err := s.db.Exec(`DELETE FROM audit_log WHERE rowid IN (
+			SELECT rowid FROM audit_log WHERE timestamp < ? LIMIT ?
+		)`, t, batchSize)
+		if err != nil {
+			return total, fmt.Errorf("db.DeleteAuditEntriesBefore: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("db.DeleteAuditEntriesBefore: %w", err)
+		}
+		total += n
+		if n < int64(batchSize) {
+			break
+		}
+	}
+	return total, nil
+}
+
+// IncrementalVacuum runs an incremental vacuum to reclaim free pages.
+func (s *Store) IncrementalVacuum() error {
+	_, err := s.db.Exec("PRAGMA incremental_vacuum")
+	return err
 }

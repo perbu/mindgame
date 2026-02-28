@@ -918,3 +918,113 @@ func TestDeleteResponseScoringRule(t *testing.T) {
 		t.Error("expected error for nonexistent rule")
 	}
 }
+
+func TestDeleteAuditEntriesBefore(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	recent := now.Add(-10 * time.Minute)
+
+	entries := []*AuditEntry{
+		{Timestamp: old, Method: "GET", URL: "http://a.com/1", Host: "a.com", Action: "ALLOW", RiskSignals: "[]"},
+		{Timestamp: old, Method: "GET", URL: "http://a.com/2", Host: "a.com", Action: "ALLOW", RiskSignals: "[]"},
+		{Timestamp: old, Method: "GET", URL: "http://a.com/3", Host: "a.com", Action: "ALLOW", RiskSignals: "[]"},
+		{Timestamp: recent, Method: "GET", URL: "http://b.com/4", Host: "b.com", Action: "ALLOW", RiskSignals: "[]"},
+		{Timestamp: recent, Method: "GET", URL: "http://b.com/5", Host: "b.com", Action: "ALLOW", RiskSignals: "[]"},
+	}
+	for _, e := range entries {
+		if err := store.InsertAuditEntry(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Delete entries older than 1 hour.
+	cutoff := now.Add(-1 * time.Hour)
+	deleted, err := store.DeleteAuditEntriesBefore(cutoff, 100)
+	if err != nil {
+		t.Fatalf("DeleteAuditEntriesBefore: %v", err)
+	}
+	if deleted != 3 {
+		t.Errorf("deleted = %d, want 3", deleted)
+	}
+
+	// Verify only recent entries remain.
+	remaining, err := store.ListAuditEntries(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 2 {
+		t.Errorf("remaining = %d, want 2", len(remaining))
+	}
+}
+
+func TestDeleteAuditEntriesBeforeBatching(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 25; i++ {
+		e := &AuditEntry{
+			Timestamp: old, Method: "GET", URL: "http://a.com",
+			Host: "a.com", Action: "ALLOW", RiskSignals: "[]",
+		}
+		if err := store.InsertAuditEntry(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Delete with small batch size to exercise the loop.
+	deleted, err := store.DeleteAuditEntriesBefore(time.Now(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 25 {
+		t.Errorf("deleted = %d, want 25", deleted)
+	}
+
+	remaining, err := store.ListAuditEntries(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("remaining = %d, want 0", len(remaining))
+	}
+}
+
+func TestDeleteAuditEntriesBeforeNoop(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	// Nothing to delete on empty table.
+	deleted, err := store.DeleteAuditEntriesBefore(time.Now(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d, want 0", deleted)
+	}
+}
+
+func TestIncrementalVacuum(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	// Should not error even on an empty database.
+	if err := store.IncrementalVacuum(); err != nil {
+		t.Fatalf("IncrementalVacuum: %v", err)
+	}
+}
