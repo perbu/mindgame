@@ -370,6 +370,163 @@ func TestDreamSSE(t *testing.T) {
 	}
 }
 
+func TestRespScoringCRUD(t *testing.T) {
+	srv := setupTestServer(t)
+
+	// Create.
+	form := url.Values{"name": {"resp_rule"}, "expr": {"true"}, "points": {"5"}, "note": {"test resp"}}
+	req := httptest.NewRequest("POST", "/scoring/response", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "resp_rule") {
+		t.Error("response missing created rule")
+	}
+
+	// Delete.
+	req = httptest.NewRequest("DELETE", "/scoring/response/resp_rule", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200", rec.Code)
+	}
+}
+
+func TestRespScoringCreateInvalid(t *testing.T) {
+	srv := setupTestServer(t)
+
+	tests := []struct {
+		name string
+		form url.Values
+	}{
+		{"missing name", url.Values{"expr": {"true"}, "points": {"5"}}},
+		{"missing expr", url.Values{"name": {"r1"}, "points": {"5"}}},
+		{"bad points", url.Values{"name": {"r1"}, "expr": {"true"}, "points": {"abc"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/scoring/response", strings.NewReader(tt.form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
+func TestRespScoringUpdate(t *testing.T) {
+	srv := setupTestServer(t)
+
+	// Seed a rule.
+	if err := srv.store.InsertResponseScoringRule(&db.ScoringRule{
+		Name: "resp_r1", Expr: "true", Points: 1, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"expr": {"false"}, "points": {"10"}, "enabled": {"false"}, "note": {"updated"}}
+	req := httptest.NewRequest("PUT", "/scoring/response/resp_r1", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want 200", rec.Code)
+	}
+}
+
+func TestRespScoringUpdateInvalidPoints(t *testing.T) {
+	srv := setupTestServer(t)
+
+	form := url.Values{"expr": {"true"}, "points": {"abc"}, "note": {""}}
+	req := httptest.NewRequest("PUT", "/scoring/response/whatever", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestRespScoringTest(t *testing.T) {
+	srv := setupTestServer(t)
+
+	// Insert a response scoring rule.
+	if err := srv.store.InsertResponseScoringRule(&db.ScoringRule{
+		Name: "always_match", Expr: "true", Points: 7, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"status_code":  {"200"},
+		"body":         {"some body"},
+		"content_type": {"text/html"},
+		"host":         {"example.com"},
+	}
+	req := httptest.NewRequest("POST", "/scoring/response/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "7") {
+		t.Error("expected score of 7 in output")
+	}
+	if !strings.Contains(body, "always_match") {
+		t.Error("expected always_match signal")
+	}
+}
+
+func TestDomainUpdate(t *testing.T) {
+	srv := setupTestServer(t)
+
+	// Seed a domain.
+	if err := srv.store.InsertDomainRule(&db.DomainRule{
+		Host: "update.com", Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"tier": {"deny"}, "banned": {"true"}, "note": {"banned now"}}
+	req := httptest.NewRequest("PUT", "/domains/update.com", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestScoringUpdate(t *testing.T) {
+	srv := setupTestServer(t)
+
+	// Seed a scoring rule.
+	if err := srv.store.InsertScoringRule(&db.ScoringRule{
+		Name: "upd_rule", Expr: "true", Points: 1, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"expr": {"false"}, "points": {"20"}, "enabled": {"false"}, "note": {"changed"}}
+	req := httptest.NewRequest("PUT", "/scoring/upd_rule", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
 func TestFeedDetail(t *testing.T) {
 	srv := setupTestServer(t)
 

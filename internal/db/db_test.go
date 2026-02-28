@@ -2,6 +2,7 @@ package db
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -679,5 +680,188 @@ func TestGetAuditStats(t *testing.T) {
 	}
 	if stats.RuleHitFrequency[0].Count != 3 {
 		t.Errorf("top rule count = %d, want 3", stats.RuleHitFrequency[0].Count)
+	}
+}
+
+func TestParseSignals(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"valid array", `["a","b","c"]`, []string{"a", "b", "c"}},
+		{"empty array", `[]`, []string{}},
+		{"empty string", ``, nil},
+		{"malformed JSON", `not json`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseSignals(tt.input)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ParseSignals(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInsertAndListResponseScoringRules(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	rules := []ScoringRule{
+		{Name: "resp_c", Expr: `status_code >= 500`, Points: 3, Enabled: true, Note: "server error"},
+		{Name: "resp_a", Expr: `body_size > 1000`, Points: 5, Enabled: false, Note: ""},
+		{Name: "resp_b", Expr: `host == "evil.com"`, Points: 10, Enabled: true, Note: "evil"},
+	}
+	if err := store.InsertResponseScoringRules(rules); err != nil {
+		t.Fatalf("InsertResponseScoringRules: %v", err)
+	}
+
+	got, err := store.ListResponseScoringRules()
+	if err != nil {
+		t.Fatalf("ListResponseScoringRules: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(got))
+	}
+	// Ordered by name.
+	if got[0].Name != "resp_a" {
+		t.Errorf("first name = %q, want resp_a", got[0].Name)
+	}
+	if got[1].Name != "resp_b" {
+		t.Errorf("second name = %q, want resp_b", got[1].Name)
+	}
+	if got[2].Name != "resp_c" {
+		t.Errorf("third name = %q, want resp_c", got[2].Name)
+	}
+}
+
+func TestCountResponseScoringRulesEmpty(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	count, err := store.CountResponseScoringRules()
+	if err != nil {
+		t.Fatalf("CountResponseScoringRules: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+func TestInsertResponseScoringRuleSingle(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	r := &ScoringRule{Name: "resp_test", Expr: `status_code == 200`, Points: 2, Enabled: true, Note: "ok check"}
+	if err := store.InsertResponseScoringRule(r); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := store.ListResponseScoringRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].Name != "resp_test" {
+		t.Errorf("name = %q, want resp_test", rules[0].Name)
+	}
+	if rules[0].Points != 2 {
+		t.Errorf("points = %d, want 2", rules[0].Points)
+	}
+	if !rules[0].Enabled {
+		t.Error("expected enabled=true")
+	}
+	if rules[0].Note != "ok check" {
+		t.Errorf("note = %q, want %q", rules[0].Note, "ok check")
+	}
+}
+
+func TestUpdateResponseScoringRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.InsertResponseScoringRule(&ScoringRule{
+		Name: "r1", Expr: "true", Points: 1, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.UpdateResponseScoringRule("r1", "false", 10, false, "updated"); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := store.ListResponseScoringRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules[0].Expr != "false" {
+		t.Errorf("expr = %q, want false", rules[0].Expr)
+	}
+	if rules[0].Points != 10 {
+		t.Errorf("points = %d, want 10", rules[0].Points)
+	}
+	if rules[0].Enabled {
+		t.Error("expected enabled=false")
+	}
+	if rules[0].Note != "updated" {
+		t.Errorf("note = %q, want updated", rules[0].Note)
+	}
+}
+
+func TestUpdateResponseScoringRuleNotFound(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpdateResponseScoringRule("nonexistent", "true", 1, true, ""); err == nil {
+		t.Error("expected error for nonexistent rule")
+	}
+}
+
+func TestDeleteResponseScoringRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.InsertResponseScoringRule(&ScoringRule{
+		Name: "r1", Expr: "true", Points: 1, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteResponseScoringRule("r1"); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := store.CountResponseScoringRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+
+	// Delete nonexistent should error.
+	if err := store.DeleteResponseScoringRule("nonexistent"); err == nil {
+		t.Error("expected error for nonexistent rule")
 	}
 }
