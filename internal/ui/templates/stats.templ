@@ -26,10 +26,14 @@ templ StatsContent(stats *db.AuditStats) {
 		</div>
 		<div class="stat-card">
 			<div class="value" style="color:var(--amber)">{ fmt.Sprintf("%d", stats.ByAction["BLOCK"]) }</div>
-			<div class="label">Blocked</div>
+			<div class="label">Req Blocked</div>
 		</div>
 		<div class="stat-card">
-			<div class="value" style="color:var(--red)">{ fmt.Sprintf("%d", stats.ByAction["BAN"]+stats.ByAction["DENY"]) }</div>
+			<div class="value" style="color:var(--amber)">{ fmt.Sprintf("%d", stats.ByAction["RESP_BLOCK"]) }</div>
+			<div class="label">Resp Blocked</div>
+		</div>
+		<div class="stat-card">
+			<div class="value" style="color:var(--red)">{ fmt.Sprintf("%d", stats.ByAction["BAN"]+stats.ByAction["DENY"]+stats.ByAction["RESP_BAN"]) }</div>
 			<div class="label">Banned/Denied</div>
 		</div>
 		<div class="stat-card">

@@ -41,7 +41,16 @@ func setupTestServer(t *testing.T) *Server {
 		return err
 	}
 
-	return NewServer(store, pol, reloadScorer, broker)
+	reloadRespScorer := func() error {
+		rules, err := store.ListResponseScoringRules()
+		if err != nil {
+			return err
+		}
+		_, err = scoring.NewResponse(rules)
+		return err
+	}
+
+	return NewServer(store, pol, reloadScorer, reloadRespScorer, broker)
 }
 
 func TestFeedPage(t *testing.T) {

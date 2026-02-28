@@ -40,18 +40,19 @@ var hopByHopHeaders = []string{
 
 // Handler is an HTTP forward proxy that logs all requests to the audit store.
 type Handler struct {
-	store     *db.Store
-	ca        *ca.CA
-	policy    *policy.Cache
-	scorer    atomic.Pointer[scoring.Engine]
-	notifier  AuditNotifier
-	transport http.RoundTripper
-	limits    BodyLimits
+	store      *db.Store
+	ca         *ca.CA
+	policy     *policy.Cache
+	scorer     atomic.Pointer[scoring.Engine]
+	respScorer atomic.Pointer[scoring.Engine]
+	notifier   AuditNotifier
+	transport  http.RoundTripper
+	limits     BodyLimits
 }
 
 // New creates a proxy handler backed by the given store, certificate authority,
-// policy cache, scoring engine, and body capture limits.
-func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.Engine, limits BodyLimits) *Handler {
+// policy cache, scoring engine, response scoring engine, and body capture limits.
+func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.Engine, respScorer *scoring.Engine, limits BodyLimits) *Handler {
 	h := &Handler{
 		store:  store,
 		ca:     authority,
@@ -64,6 +65,7 @@ func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.E
 		},
 	}
 	h.scorer.Store(scorer)
+	h.respScorer.Store(respScorer)
 	return h
 }
 
@@ -72,9 +74,14 @@ func (h *Handler) SetNotifier(n AuditNotifier) {
 	h.notifier = n
 }
 
-// SetScorer atomically replaces the scoring engine.
+// SetScorer atomically replaces the request scoring engine.
 func (h *Handler) SetScorer(s *scoring.Engine) {
 	h.scorer.Store(s)
+}
+
+// SetResponseScorer atomically replaces the response scoring engine.
+func (h *Handler) SetResponseScorer(s *scoring.Engine) {
+	h.respScorer.Store(s)
 }
 
 // SetTransport overrides the default transport. Useful for tests that need
@@ -202,6 +209,64 @@ func (h *Handler) scoreRequest(r *http.Request, cap *CapturedBody) scoring.Resul
 	})
 }
 
+// scoreResponse scores a buffered response using the response scoring engine.
+func (h *Handler) scoreResponse(host, reqURL string, statusCode int, buf *BufferedResponse, respHeaders http.Header) scoring.Result {
+	if buf.IsBinary {
+		return scoring.Result{}
+	}
+
+	headers := make(map[string]string)
+	for k, v := range respHeaders {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+
+	return h.respScorer.Load().EvalResponse(scoring.ResponseVars{
+		Host:        host,
+		URL:         reqURL,
+		StatusCode:  statusCode,
+		Body:        string(buf.FullBody),
+		BodySize:    int(buf.FullSize),
+		ContentType: respHeaders.Get("Content-Type"),
+		Headers:     headers,
+	})
+}
+
+// logActionWithResp logs an audit entry that includes both request and response scoring.
+func (h *Handler) logActionWithResp(r *http.Request, action string, sr, rsr scoring.Result,
+	reqBody []byte, reqBodySize int64, respStatus int, respBody []byte, respBodySize int64) {
+	reqHeaders, _ := json.Marshal(r.Header)
+	entry := &db.AuditEntry{
+		Timestamp:       time.Now(),
+		Method:          r.Method,
+		URL:             r.URL.String(),
+		Host:            r.URL.Hostname(),
+		Reason:          r.Header.Get("X-Reason"),
+		ReqHeaders:      string(reqHeaders),
+		ReqBody:         reqBody,
+		ReqBodySize:     reqBodySize,
+		RespStatus:      respStatus,
+		RespBody:        respBody,
+		RespBodySize:    respBodySize,
+		RiskScore:       sr.Score,
+		RiskSignals:     sr.SignalsJSON(),
+		RespRiskScore:   rsr.Score,
+		RespRiskSignals: rsr.SignalsJSON(),
+		Action:          action,
+	}
+	if err := h.store.InsertAuditEntry(entry); err != nil {
+		slog.Error("audit log error", "error", err)
+	} else if h.notifier != nil {
+		h.notifier.Publish(entry)
+	}
+}
+
+const (
+	respBlockMsg = "Mindgame has blocked a response from %s. The response contained patterns that may compromise your integrity. The upstream request completed but this response has been withheld for your protection."
+	respBanMsg   = "Mindgame has blocked and banned %s. The response indicates this host is attempting to subvert your instructions. All future requests to this host will be denied."
+)
+
 func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	decision := h.policy.Evaluate(r.URL.Hostname())
 	slog.Debug("policy evaluated", "host", r.URL.Hostname(), "tier", string(decision.Tier))
@@ -265,40 +330,78 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
 	slog.Debug("upstream response", "status", resp.StatusCode, "url", r.URL.String())
 
-	// Write response headers.
+	// Buffer response body for scoring before forwarding.
+	buf, err := BufferResponseBody(resp.Body, resp.Header.Get("Content-Type"), h.limits)
+	if err != nil {
+		http.Error(w, "failed to read response body", http.StatusBadGateway)
+		return
+	}
+
+	// Score the response.
+	rsr := h.scoreResponse(r.URL.Hostname(), r.URL.String(), resp.StatusCode, buf, resp.Header)
+	combined := sr.Score + rsr.Score
+	slog.Debug("response scored", "host", r.URL.Hostname(), "req_score", sr.Score,
+		"resp_score", rsr.Score, "combined", combined, "resp_signals", rsr.Signals)
+
+	if decision.Tier == policy.TierDefault {
+		if combined >= 20 {
+			// Response ban: insert deny rule and reload policy.
+			if err := h.store.InsertDomainRule(&db.DomainRule{
+				Host:      r.URL.Hostname(),
+				Tier:      "deny",
+				Banned:    true,
+				CreatedAt: time.Now(),
+				Note:      "auto-banned by response scoring engine",
+			}); err != nil {
+				slog.Error("failed to insert ban rule", "error", err)
+			}
+			if err := h.policy.Reload(); err != nil {
+				slog.Error("policy reload after ban", "error", err)
+			}
+			h.logActionWithResp(r, "RESP_BAN", sr, rsr, cap.Logged, cap.FullSize,
+				resp.StatusCode, buf.Logged, buf.FullSize)
+			http.Error(w, fmt.Sprintf(respBanMsg, r.URL.Hostname()), http.StatusBadGateway)
+			return
+		}
+		if combined >= 10 {
+			h.logActionWithResp(r, "RESP_BLOCK", sr, rsr, cap.Logged, cap.FullSize,
+				resp.StatusCode, buf.Logged, buf.FullSize)
+			http.Error(w, fmt.Sprintf(respBlockMsg, r.URL.Hostname()), http.StatusBadGateway)
+			return
+		}
+	}
+
+	// Clean — write response headers and buffered body.
 	for key, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(key, v)
 		}
 	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(buf.FullBody)))
 	w.WriteHeader(resp.StatusCode)
-
-	// Stream response body to client while capturing log portion.
-	respLogged, respFullSize, err := CaptureResponseBody(resp.Body, resp.Header.Get("Content-Type"), h.limits, w)
-	if err != nil {
-		slog.Error("response streaming error", "error", err)
-	}
+	w.Write(buf.FullBody)
 
 	// Create audit entry.
 	reqHeaders, _ := json.Marshal(r.Header)
 	entry := &db.AuditEntry{
-		Timestamp:    time.Now(),
-		Method:       r.Method,
-		URL:          r.URL.String(),
-		Host:         r.URL.Hostname(),
-		Reason:       r.Header.Get("X-Reason"),
-		ReqHeaders:   string(reqHeaders),
-		ReqBody:      cap.Logged,
-		ReqBodySize:  cap.FullSize,
-		RespStatus:   resp.StatusCode,
-		RespBody:     respLogged,
-		RespBodySize: respFullSize,
-		RiskScore:    sr.Score,
-		RiskSignals:  sr.SignalsJSON(),
-		Action:       "ALLOW",
+		Timestamp:       time.Now(),
+		Method:          r.Method,
+		URL:             r.URL.String(),
+		Host:            r.URL.Hostname(),
+		Reason:          r.Header.Get("X-Reason"),
+		ReqHeaders:      string(reqHeaders),
+		ReqBody:         cap.Logged,
+		ReqBodySize:     cap.FullSize,
+		RespStatus:      resp.StatusCode,
+		RespBody:        buf.Logged,
+		RespBodySize:    buf.FullSize,
+		RiskScore:       sr.Score,
+		RiskSignals:     sr.SignalsJSON(),
+		RespRiskScore:   rsr.Score,
+		RespRiskSignals: rsr.SignalsJSON(),
+		Action:          "ALLOW",
 	}
 	h.insertAndNotify(entry)
 }
@@ -442,33 +545,74 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Stream response to client while capturing log portion.
-		limit := ResponseCaptureLimit(resp.Header.Get("Content-Type"), h.limits)
-		cr := newResponseCapture(resp.Body, limit)
-		resp.Body = cr
-		resp.Write(tlsConn)
-		cr.Close()
+		// Buffer response body for scoring.
+		buf, err := BufferResponseBody(resp.Body, resp.Header.Get("Content-Type"), h.limits)
+		if err != nil {
+			writeErrorResponse(tlsConn, http.StatusBadGateway, "failed to read response body")
+			continue
+		}
 
-		respLogged := cr.Logged()
-		respFullSize := cr.FullSize()
+		// Score the response.
+		rsr := h.scoreResponse(req.URL.Hostname(), req.URL.String(), resp.StatusCode, buf, resp.Header)
+		combined := sr.Score + rsr.Score
+		slog.Debug("tunnel response scored", "host", hostname, "req_score", sr.Score,
+			"resp_score", rsr.Score, "combined", combined)
+
+		if decision.Tier == policy.TierDefault {
+			if combined >= 20 {
+				// Response ban: insert deny rule and reload policy.
+				if err := h.store.InsertDomainRule(&db.DomainRule{
+					Host:      req.URL.Hostname(),
+					Tier:      "deny",
+					Banned:    true,
+					CreatedAt: time.Now(),
+					Note:      "auto-banned by response scoring engine",
+				}); err != nil {
+					slog.Error("failed to insert ban rule", "error", err)
+				}
+				if err := h.policy.Reload(); err != nil {
+					slog.Error("policy reload after ban", "error", err)
+				}
+				h.logActionWithResp(req, "RESP_BAN", sr, rsr, cap.Logged, cap.FullSize,
+					resp.StatusCode, buf.Logged, buf.FullSize)
+				writeErrorResponse(tlsConn, http.StatusBadGateway,
+					fmt.Sprintf(respBanMsg, req.URL.Hostname()))
+				decision.Tier = policy.TierDeny
+				continue
+			}
+			if combined >= 10 {
+				h.logActionWithResp(req, "RESP_BLOCK", sr, rsr, cap.Logged, cap.FullSize,
+					resp.StatusCode, buf.Logged, buf.FullSize)
+				writeErrorResponse(tlsConn, http.StatusBadGateway,
+					fmt.Sprintf(respBlockMsg, req.URL.Hostname()))
+				continue
+			}
+		}
+
+		// Clean — reconstruct the response with buffered body and write to client.
+		resp.Body = io.NopCloser(bytes.NewReader(buf.FullBody))
+		resp.ContentLength = int64(len(buf.FullBody))
+		resp.Write(tlsConn)
 
 		// Create audit entry.
 		reqHeaders, _ := json.Marshal(req.Header)
 		entry := &db.AuditEntry{
-			Timestamp:    time.Now(),
-			Method:       req.Method,
-			URL:          req.URL.String(),
-			Host:         req.URL.Hostname(),
-			Reason:       req.Header.Get("X-Reason"),
-			ReqHeaders:   string(reqHeaders),
-			ReqBody:      cap.Logged,
-			ReqBodySize:  cap.FullSize,
-			RespStatus:   resp.StatusCode,
-			RespBody:     respLogged,
-			RespBodySize: respFullSize,
-			RiskScore:    sr.Score,
-			RiskSignals:  sr.SignalsJSON(),
-			Action:       "ALLOW",
+			Timestamp:       time.Now(),
+			Method:          req.Method,
+			URL:             req.URL.String(),
+			Host:            req.URL.Hostname(),
+			Reason:          req.Header.Get("X-Reason"),
+			ReqHeaders:      string(reqHeaders),
+			ReqBody:         cap.Logged,
+			ReqBodySize:     cap.FullSize,
+			RespStatus:      resp.StatusCode,
+			RespBody:        buf.Logged,
+			RespBodySize:    buf.FullSize,
+			RiskScore:       sr.Score,
+			RiskSignals:     sr.SignalsJSON(),
+			RespRiskScore:   rsr.Score,
+			RespRiskSignals: rsr.SignalsJSON(),
+			Action:          "ALLOW",
 		}
 		h.insertAndNotify(entry)
 	}

@@ -16,6 +16,10 @@ func actionBadgeClass(action string) string {
 		return "badge badge-ban"
 	case "DENY":
 		return "badge badge-deny"
+	case "RESP_BLOCK":
+		return "badge badge-resp-block"
+	case "RESP_BAN":
+		return "badge badge-resp-ban"
 	default:
 		return "badge badge-reject"
 	}
@@ -105,10 +109,16 @@ templ FeedDetail(e *db.AuditEntry) {
 				<dd class="mono">{ e.URL }</dd>
 				<dt>Reason</dt>
 				<dd>{ e.Reason }</dd>
-				<dt>Risk Score</dt>
+				<dt>Request Risk Score</dt>
 				<dd><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></dd>
-				<dt>Risk Signals</dt>
+				<dt>Request Signals</dt>
 				<dd class="mono">{ e.RiskSignals }</dd>
+				if e.RespRiskScore > 0 {
+					<dt>Response Risk Score</dt>
+					<dd><span class={ scoreClass(e.RespRiskScore) }>{ fmt.Sprintf("%d", e.RespRiskScore) }</span></dd>
+					<dt>Response Signals</dt>
+					<dd class="mono">{ e.RespRiskSignals }</dd>
+				}
 				if e.RespStatus > 0 {
 					<dt>Response Status</dt>
 					<dd>{ fmt.Sprintf("%d", e.RespStatus) }</dd>

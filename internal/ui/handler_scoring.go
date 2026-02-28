@@ -16,7 +16,12 @@ func (s *Server) handleScoring(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	templates.ScoringPage(rules).Render(r.Context(), w)
+	respRules, err := s.store.ListResponseScoringRules()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	templates.ScoringPage(rules, respRules).Render(r.Context(), w)
 }
 
 func (s *Server) handleScoringCreate(w http.ResponseWriter, r *http.Request) {

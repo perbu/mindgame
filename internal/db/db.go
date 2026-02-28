@@ -21,21 +21,23 @@ type DomainRule struct {
 
 // AuditEntry represents a single row in the audit_log table.
 type AuditEntry struct {
-	ID           int64
-	Timestamp    time.Time
-	Method       string
-	URL          string
-	Host         string
-	Reason       string
-	ReqHeaders   string
-	ReqBody      []byte
-	ReqBodySize  int64
-	RespStatus   int
-	RespBody     []byte
-	RespBodySize int64
-	RiskScore    int
-	RiskSignals  string
-	Action       string
+	ID              int64
+	Timestamp       time.Time
+	Method          string
+	URL             string
+	Host            string
+	Reason          string
+	ReqHeaders      string
+	ReqBody         []byte
+	ReqBodySize     int64
+	RespStatus      int
+	RespBody        []byte
+	RespBodySize    int64
+	RiskScore       int
+	RiskSignals     string
+	RespRiskScore   int
+	RespRiskSignals string
+	Action          string
 }
 
 // Store wraps a SQLite database connection.
@@ -77,6 +79,14 @@ CREATE TABLE IF NOT EXISTS scoring_rules (
 	enabled BOOLEAN NOT NULL DEFAULT 1,
 	note    TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS response_scoring_rules (
+	name    TEXT PRIMARY KEY,
+	expr    TEXT NOT NULL,
+	points  INTEGER NOT NULL,
+	enabled BOOLEAN NOT NULL DEFAULT 1,
+	note    TEXT NOT NULL DEFAULT ''
+);
 `
 
 // Open opens a SQLite database at path, enables WAL mode, and creates tables.
@@ -97,6 +107,8 @@ func Open(path string) (*Store, error) {
 	for _, stmt := range []string{
 		`ALTER TABLE audit_log ADD COLUMN req_body_size INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE audit_log ADD COLUMN resp_body_size INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE audit_log ADD COLUMN resp_risk_score INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE audit_log ADD COLUMN resp_risk_signals TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		_, _ = db.Exec(stmt)
 	}
@@ -119,11 +131,15 @@ func (s *Store) InsertAuditEntry(e *AuditEntry) error {
 	if respBody == nil {
 		respBody = []byte{}
 	}
+	respRiskSignals := e.RespRiskSignals
+	if respRiskSignals == "" {
+		respRiskSignals = "[]"
+	}
 	res, err := s.db.Exec(`
-		INSERT INTO audit_log (timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO audit_log (timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.Timestamp, e.Method, e.URL, e.Host, e.Reason, e.ReqHeaders, reqBody, e.ReqBodySize,
-		e.RespStatus, respBody, e.RespBodySize, e.RiskScore, e.RiskSignals, e.Action,
+		e.RespStatus, respBody, e.RespBodySize, e.RiskScore, e.RiskSignals, e.RespRiskScore, respRiskSignals, e.Action,
 	)
 	if err != nil {
 		return err
@@ -139,7 +155,7 @@ func (s *Store) InsertAuditEntry(e *AuditEntry) error {
 // ListAuditEntries returns the most recent audit log entries, up to limit.
 func (s *Store) ListAuditEntries(limit int) ([]AuditEntry, error) {
 	rows, err := s.db.Query(`
-		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action
 		FROM audit_log
 		ORDER BY id DESC
 		LIMIT ?`, limit)
@@ -153,7 +169,7 @@ func (s *Store) ListAuditEntries(limit int) ([]AuditEntry, error) {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
 			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
-			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
+			&e.RiskScore, &e.RiskSignals, &e.RespRiskScore, &e.RespRiskSignals, &e.Action); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
@@ -391,11 +407,11 @@ func (s *Store) DeleteScoringRule(name string) error {
 func (s *Store) GetAuditEntry(id int64) (*AuditEntry, error) {
 	var e AuditEntry
 	err := s.db.QueryRow(`
-		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action
 		FROM audit_log WHERE id = ?`, id).
 		Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
 			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
-			&e.RiskScore, &e.RiskSignals, &e.Action)
+			&e.RiskScore, &e.RiskSignals, &e.RespRiskScore, &e.RespRiskSignals, &e.Action)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -446,7 +462,7 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 		args = append(args, f.AfterID)
 	}
 
-	query := `SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action FROM audit_log`
+	query := `SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action FROM audit_log`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -470,7 +486,7 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
 			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
-			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
+			&e.RiskScore, &e.RiskSignals, &e.RespRiskScore, &e.RespRiskSignals, &e.Action); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
@@ -568,8 +584,8 @@ func (s *Store) GetAuditStats(window time.Duration) (*AuditStats, error) {
 
 	// Recent bans.
 	rows, err = s.db.Query(`
-		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action
-		FROM audit_log WHERE timestamp > ? AND action = 'BAN' ORDER BY id DESC LIMIT 10`, cutoff)
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, resp_risk_score, resp_risk_signals, action
+		FROM audit_log WHERE timestamp > ? AND action IN ('BAN', 'RESP_BAN') ORDER BY id DESC LIMIT 10`, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +593,7 @@ func (s *Store) GetAuditStats(window time.Duration) (*AuditStats, error) {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
 			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
-			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
+			&e.RiskScore, &e.RiskSignals, &e.RespRiskScore, &e.RespRiskSignals, &e.Action); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -614,4 +630,94 @@ func ParseSignals(signalsJSON string) []string {
 	var signals []string
 	_ = json.Unmarshal([]byte(signalsJSON), &signals)
 	return signals
+}
+
+// --- Response Scoring Rules ---
+
+// ListResponseScoringRules returns all response scoring rules ordered by name.
+func (s *Store) ListResponseScoringRules() ([]ScoringRule, error) {
+	rows, err := s.db.Query(`SELECT name, expr, points, enabled, note FROM response_scoring_rules ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []ScoringRule
+	for rows.Next() {
+		var r ScoringRule
+		if err := rows.Scan(&r.Name, &r.Expr, &r.Points, &r.Enabled, &r.Note); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// CountResponseScoringRules returns the number of rows in the response_scoring_rules table.
+func (s *Store) CountResponseScoringRules() (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM response_scoring_rules`).Scan(&count)
+	return count, err
+}
+
+// InsertResponseScoringRule inserts a single response scoring rule.
+func (s *Store) InsertResponseScoringRule(r *ScoringRule) error {
+	_, err := s.db.Exec(`INSERT INTO response_scoring_rules (name, expr, points, enabled, note) VALUES (?, ?, ?, ?, ?)`,
+		r.Name, r.Expr, r.Points, r.Enabled, r.Note)
+	return err
+}
+
+// InsertResponseScoringRules batch-inserts response scoring rules in a single transaction.
+func (s *Store) InsertResponseScoringRules(rules []ScoringRule) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO response_scoring_rules (name, expr, points, enabled, note) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range rules {
+		if _, err := stmt.Exec(r.Name, r.Expr, r.Points, r.Enabled, r.Note); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// UpdateResponseScoringRule updates an existing response scoring rule.
+func (s *Store) UpdateResponseScoringRule(name, expr string, points int, enabled bool, note string) error {
+	res, err := s.db.Exec(`UPDATE response_scoring_rules SET expr=?, points=?, enabled=?, note=? WHERE name=?`,
+		expr, points, enabled, note, name)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("response scoring rule %q not found", name)
+	}
+	return nil
+}
+
+// DeleteResponseScoringRule deletes a response scoring rule by name.
+func (s *Store) DeleteResponseScoringRule(name string) error {
+	res, err := s.db.Exec(`DELETE FROM response_scoring_rules WHERE name=?`, name)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("response scoring rule %q not found", name)
+	}
+	return nil
 }

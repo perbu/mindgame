@@ -13,21 +13,23 @@ import (
 
 // Server serves the web UI dashboard.
 type Server struct {
-	store        *db.Store
-	policy       *policy.Cache
-	broker       *Broker
-	reloadScorer func() error
-	mux          *http.ServeMux
+	store            *db.Store
+	policy           *policy.Cache
+	broker           *Broker
+	reloadScorer     func() error
+	reloadRespScorer func() error
+	mux              *http.ServeMux
 }
 
 // NewServer creates a UI server with all routes registered.
-func NewServer(store *db.Store, pol *policy.Cache, reloadScorer func() error, broker *Broker) *Server {
+func NewServer(store *db.Store, pol *policy.Cache, reloadScorer func() error, reloadRespScorer func() error, broker *Broker) *Server {
 	s := &Server{
-		store:        store,
-		policy:       pol,
-		broker:       broker,
-		reloadScorer: reloadScorer,
-		mux:          http.NewServeMux(),
+		store:            store,
+		policy:           pol,
+		broker:           broker,
+		reloadScorer:     reloadScorer,
+		reloadRespScorer: reloadRespScorer,
+		mux:              http.NewServeMux(),
 	}
 
 	// Feed
@@ -41,12 +43,18 @@ func NewServer(store *db.Store, pol *policy.Cache, reloadScorer func() error, br
 	s.mux.HandleFunc("PUT /domains/{host}", s.handleDomainUpdate)
 	s.mux.HandleFunc("DELETE /domains/{host}", s.handleDomainDelete)
 
-	// Scoring
+	// Scoring (request rules)
 	s.mux.HandleFunc("GET /scoring", s.handleScoring)
 	s.mux.HandleFunc("POST /scoring", s.handleScoringCreate)
 	s.mux.HandleFunc("POST /scoring/test", s.handleScoringTest)
 	s.mux.HandleFunc("PUT /scoring/{name}", s.handleScoringUpdate)
 	s.mux.HandleFunc("DELETE /scoring/{name}", s.handleScoringDelete)
+
+	// Scoring (response rules)
+	s.mux.HandleFunc("POST /scoring/response", s.handleRespScoringCreate)
+	s.mux.HandleFunc("POST /scoring/response/test", s.handleRespScoringTest)
+	s.mux.HandleFunc("PUT /scoring/response/{name}", s.handleRespScoringUpdate)
+	s.mux.HandleFunc("DELETE /scoring/response/{name}", s.handleRespScoringDelete)
 
 	// Stats
 	s.mux.HandleFunc("GET /stats", s.handleStats)

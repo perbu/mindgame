@@ -143,6 +143,47 @@ func ResponseCaptureLimit(contentType string, limits BodyLimits) int {
 	return limits.MaxTextLog
 }
 
+// maxResponseBuffer is the hard cap for buffering response bodies (10MB).
+const maxResponseBuffer = 10 << 20
+
+// BufferedResponse holds a fully buffered response body for scoring and forwarding.
+type BufferedResponse struct {
+	Logged   []byte // portion saved for audit logging
+	FullBody []byte // complete body for forwarding
+	FullSize int64  // total body size
+	IsBinary bool   // whether the body is binary content
+}
+
+// BufferResponseBody reads the entire response body into memory (up to 10MB)
+// so it can be scored before forwarding. Returns the logged portion for audit,
+// the full body for forwarding, and the total size.
+func BufferResponseBody(body io.ReadCloser, contentType string, limits BodyLimits) (*BufferedResponse, error) {
+	defer body.Close()
+
+	fullBody, err := io.ReadAll(io.LimitReader(body, maxResponseBuffer))
+	if err != nil {
+		return nil, err
+	}
+
+	isBin := isBinaryContentType(contentType)
+	logLimit := limits.MaxTextLog
+	if isBin {
+		logLimit = limits.MaxBinaryLog
+	}
+
+	logged := fullBody
+	if len(logged) > logLimit {
+		logged = logged[:logLimit]
+	}
+
+	return &BufferedResponse{
+		Logged:   logged,
+		FullBody: fullBody,
+		FullSize: int64(len(fullBody)),
+		IsBinary: isBin,
+	}, nil
+}
+
 // isBinaryContent checks Content-Type and falls back to content sniffing.
 func isBinaryContent(contentType string, data []byte) bool {
 	if isBinaryContentType(contentType) {

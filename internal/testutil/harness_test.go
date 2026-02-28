@@ -47,7 +47,12 @@ func setup(t *testing.T) *Harness {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
 	// Let the proxy trust httptest backends' self-signed certs.
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -505,7 +510,12 @@ func setupStandalone(t *testing.T, backendHandler http.Handler) (*db.Store, *pol
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -611,7 +621,12 @@ func TestMITMDenyAtConnect(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -679,7 +694,12 @@ func TestMITMAllowWithoutReason(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -746,13 +766,22 @@ func TestScoringEnvPath(t *testing.T) {
 	defer resp.Body.Close()
 
 	// Score 5 → still forwarded (< 10).
+	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 
-	entries, err := h.store.ListAuditEntries(10)
-	if err != nil {
-		t.Fatal(err)
+	// Poll briefly for the audit entry (proxy writes it after responding).
+	var entries []db.AuditEntry
+	for range 50 {
+		entries, err = h.store.ListAuditEntries(10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -818,15 +847,23 @@ func TestScoringLargePost(t *testing.T) {
 	defer resp.Body.Close()
 
 	// Score 3 → still forwarded (< 10).
-	// Must read response body so the proxy finishes streaming and inserts audit entry.
+	// Must read response body so the proxy finishes and inserts audit entry.
 	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 
-	entries, err := h.store.ListAuditEntries(10)
-	if err != nil {
-		t.Fatal(err)
+	// Poll briefly for the audit entry (proxy writes it after responding).
+	var entries []db.AuditEntry
+	for range 50 {
+		entries, err = h.store.ListAuditEntries(10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))

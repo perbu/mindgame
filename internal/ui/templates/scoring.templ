@@ -6,11 +6,11 @@ import (
 	"github.com/perbu/mindgame/internal/scoring"
 )
 
-templ ScoringPage(rules []db.ScoringRule) {
+templ ScoringPage(rules []db.ScoringRule, respRules []db.ScoringRule) {
 	@Layout("Scoring Rules", "scoring") {
-		<h1>Scoring Rules</h1>
+		<h1>Request Scoring Rules</h1>
 		<div class="card">
-			<h2>Add Rule</h2>
+			<h2>Add Request Rule</h2>
 			<form hx-post="/scoring" hx-target="#scoring-table" hx-swap="innerHTML" hx-on::after-request="this.reset()">
 				<div class="form-row">
 					<div class="form-group">
@@ -34,7 +34,7 @@ templ ScoringPage(rules []db.ScoringRule) {
 			</form>
 		</div>
 		<div class="card">
-			<h2>Test Expression</h2>
+			<h2>Test Request Expression</h2>
 			<form hx-post="/scoring/test" hx-target="#test-result" hx-swap="innerHTML">
 				<div class="form-row">
 					<div class="form-group" style="flex:1">
@@ -61,7 +61,7 @@ templ ScoringPage(rules []db.ScoringRule) {
 			<div id="test-result" style="margin-top:0.75rem"></div>
 		</div>
 		<div class="card">
-			<h2>Rules</h2>
+			<h2>Request Rules</h2>
 			<table>
 				<thead>
 					<tr>
@@ -76,6 +76,78 @@ templ ScoringPage(rules []db.ScoringRule) {
 				<tbody id="scoring-table">
 					for _, r := range rules {
 						@ScoringRow(r)
+					}
+				</tbody>
+			</table>
+		</div>
+		<h1 style="margin-top:2rem">Response Scoring Rules</h1>
+		<div class="card">
+			<h2>Add Response Rule</h2>
+			<form hx-post="/scoring/response" hx-target="#resp-scoring-table" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+				<div class="form-row">
+					<div class="form-group">
+						<label>Name</label>
+						<input type="text" name="name" placeholder="resp_rule_name" required/>
+					</div>
+					<div class="form-group">
+						<label>CEL Expression</label>
+						<input type="text" name="expr" placeholder={ `body.matches("ignore previous")` } required style="min-width:300px"/>
+					</div>
+					<div class="form-group">
+						<label>Points</label>
+						<input type="number" name="points" value="5" min="1" required style="width:80px"/>
+					</div>
+					<div class="form-group">
+						<label>Note</label>
+						<input type="text" name="note" placeholder="optional"/>
+					</div>
+					<button type="submit">Add</button>
+				</div>
+			</form>
+		</div>
+		<div class="card">
+			<h2>Test Response Expression</h2>
+			<form hx-post="/scoring/response/test" hx-target="#resp-test-result" hx-swap="innerHTML">
+				<div class="form-row">
+					<div class="form-group" style="flex:1">
+						<label>Host</label>
+						<input type="text" name="host" value="example.com"/>
+					</div>
+					<div class="form-group" style="flex:1">
+						<label>Status Code</label>
+						<input type="number" name="status_code" value="200"/>
+					</div>
+					<div class="form-group" style="flex:1">
+						<label>Content Type</label>
+						<input type="text" name="content_type" value="text/html"/>
+					</div>
+				</div>
+				<div class="form-row">
+					<div class="form-group" style="flex:1">
+						<label>Body</label>
+						<textarea name="body" rows="2" placeholder="response body"></textarea>
+					</div>
+				</div>
+				<button type="submit" class="btn-secondary">Test All Rules</button>
+			</form>
+			<div id="resp-test-result" style="margin-top:0.75rem"></div>
+		</div>
+		<div class="card">
+			<h2>Response Rules</h2>
+			<table>
+				<thead>
+					<tr>
+						<th>Enabled</th>
+						<th>Name</th>
+						<th>Expression</th>
+						<th>Points</th>
+						<th>Note</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody id="resp-scoring-table">
+					for _, r := range respRules {
+						@RespScoringRow(r)
 					}
 				</tbody>
 			</table>
@@ -112,6 +184,39 @@ templ ScoringRow(r db.ScoringRule) {
 		<td>{ r.Note }</td>
 		<td>
 			<button class="btn-sm btn-danger" hx-delete={ "/scoring/" + r.Name } hx-target="#scoring-table" hx-swap="innerHTML" hx-confirm={ "Delete rule " + r.Name + "?" }>Delete</button>
+		</td>
+	</tr>
+}
+
+templ RespScoringRows(rules []db.ScoringRule) {
+	for _, r := range rules {
+		@RespScoringRow(r)
+	}
+}
+
+templ RespScoringRow(r db.ScoringRule) {
+	<tr>
+		<td>
+			<label class="toggle">
+				if r.Enabled {
+					<input type="checkbox" checked hx-put={ "/scoring/response/" + r.Name } hx-target="#resp-scoring-table" hx-swap="innerHTML" hx-include="closest tr" name="enabled" value="true"/>
+				} else {
+					<input type="checkbox" hx-put={ "/scoring/response/" + r.Name } hx-target="#resp-scoring-table" hx-swap="innerHTML" hx-include="closest tr" name="enabled" value="true"/>
+				}
+				<span class="slider"></span>
+			</label>
+		</td>
+		<td class="mono">{ r.Name }</td>
+		<td class="mono" style="max-width:400px;word-break:break-all">{ r.Expr }</td>
+		<td>
+			<span class={ scoreClass(r.Points) }>{ fmt.Sprintf("%d", r.Points) }</span>
+			<input type="hidden" name="expr" value={ r.Expr }/>
+			<input type="hidden" name="points" value={ fmt.Sprintf("%d", r.Points) }/>
+			<input type="hidden" name="note" value={ r.Note }/>
+		</td>
+		<td>{ r.Note }</td>
+		<td>
+			<button class="btn-sm btn-danger" hx-delete={ "/scoring/response/" + r.Name } hx-target="#resp-scoring-table" hx-swap="innerHTML" hx-confirm={ "Delete rule " + r.Name + "?" }>Delete</button>
 		</td>
 	</tr>
 }

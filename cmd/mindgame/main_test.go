@@ -53,7 +53,12 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
 
 	// 3. Start proxy on a random port.
 	proxyServer := httptest.NewServer(handler)
@@ -142,7 +147,12 @@ func TestIntegrationCONNECT(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol2, scorer2, proxy.DefaultBodyLimits())
+	respScorer2, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol2, scorer2, respScorer2, proxy.DefaultBodyLimits())
 	// Let the proxy trust the httptest backend's self-signed cert.
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},

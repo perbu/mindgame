@@ -121,9 +121,35 @@ func main() {
 		slog.Error("failed to create scoring engine", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("scoring engine loaded", "rules", scorer.RuleCount())
+	slog.Info("request scoring engine loaded", "rules", scorer.RuleCount())
 
-	handler := proxy.New(store, authority, pol, scorer, limits)
+	// Seed response scoring rules if empty.
+	respCount, err := store.CountResponseScoringRules()
+	if err != nil {
+		slog.Error("failed to count response scoring rules", "error", err)
+		os.Exit(1)
+	}
+	if respCount == 0 {
+		if err := store.InsertResponseScoringRules(scoring.DefaultResponseRules()); err != nil {
+			slog.Error("failed to seed response scoring rules", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("seeded default response scoring rules", "count", len(scoring.DefaultResponseRules()))
+	}
+
+	respRules, err := store.ListResponseScoringRules()
+	if err != nil {
+		slog.Error("failed to list response scoring rules", "error", err)
+		os.Exit(1)
+	}
+	respScorer, err := scoring.NewResponse(respRules)
+	if err != nil {
+		slog.Error("failed to create response scoring engine", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("response scoring engine loaded", "rules", respScorer.RuleCount())
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, limits)
 	slog.Debug("proxy handler created")
 
 	// SSE broker connects proxy audit writes to the UI live feed.
@@ -145,7 +171,21 @@ func main() {
 		return nil
 	}
 
-	uiServer := ui.NewServer(store, pol, reloadScorer, broker)
+	// reloadRespScorer compiles response scoring rules from DB and hot-swaps the engine.
+	reloadRespScorer := func() error {
+		rules, err := store.ListResponseScoringRules()
+		if err != nil {
+			return err
+		}
+		newScorer, err := scoring.NewResponse(rules)
+		if err != nil {
+			return err
+		}
+		handler.SetResponseScorer(newScorer)
+		return nil
+	}
+
+	uiServer := ui.NewServer(store, pol, reloadScorer, reloadRespScorer, broker)
 
 	proxySrv := &http.Server{
 		Addr:    *addr,
