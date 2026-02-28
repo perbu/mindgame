@@ -27,3 +27,9 @@ expressions. SQLite-backed audit log and a web dashboard for monitoring.
 - `github.com/a-h/templ` — HTML templating
 - `github.com/google/cel-go` — CEL expression evaluation
 - `modernc.org/sqlite` — SQLite driver
+
+## Version management
+
+Run `go tool bump (-patch|-minor|-major)` after the last commit to create a
+tagged release. Bump updates `cmd/mindgame/.version` (embedded in the binary)
+and creates a git tag.

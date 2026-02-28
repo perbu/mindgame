@@ -16,12 +16,26 @@ Risk scoring uses CEL expressions. Requests scoring 10+ are blocked. Requests sc
 
 ## Quick Start
 
-```
-go build ./cmd/mindgame
-./mindgame -port 8080 -db audit.db -ui-port 9090
+### Docker
+
+```bash
+docker run -p 8080:8080 -p 9090:9090 -v mindgame-data:/data ghcr.io/perbu/mindgame
 ```
 
-First run generates `ca.pem` and `ca.key`. Add the CA to your agent's trust store:
+### From source
+
+```
+go build ./cmd/mindgame
+./mindgame -addr :8080 -db audit.db -ui-addr :9090
+```
+
+First run generates `ca.pem` and `ca.key`. Agents can fetch the CA certificate directly from the proxy:
+
+```bash
+curl http://localhost:8080/ca.pem -o ca.pem
+```
+
+Add the CA to your agent's trust store:
 
 ```bash
 # Node.js
