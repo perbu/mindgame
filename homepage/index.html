@@ -611,6 +611,56 @@ footer {
   font-size: 0.75rem;
   color: var(--text-dim);
 }
+
+/* ══════════════════════════════════
+   MOBILE
+   ══════════════════════════════════ */
+@media (max-width: 768px) {
+  section { padding: 3rem 0; }
+  .container { padding: 0 1.25rem; }
+  .hero { min-height: auto; padding: 6rem 0 3rem; }
+  .hero h1 { font-size: clamp(2.2rem, 10vw, 3rem); }
+
+  .hero-cmd {
+    flex-direction: column;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    word-break: break-all;
+  }
+  .hero-cmd .copy-hint {
+    border-left: none;
+    padding-left: 0;
+  }
+
+  .diagram-wrap, .flow-diagram {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .diagram-wrap svg { min-width: 600px; }
+  .flow-diagram svg { min-width: 560px; }
+
+  .code-block pre { font-size: 0.75rem; padding: 1rem; }
+
+  .footer-inner { flex-direction: column; text-align: center; }
+  .footer-links { gap: 1.25rem; }
+
+  .scoring-example pre { font-size: 0.75rem; padding: 1rem; }
+}
+
+@media (max-width: 480px) {
+  .container { padding: 0 1rem; }
+  .hero { padding: 4rem 0 2rem; }
+  .hero-badge { font-size: 0.7rem; }
+  .hero-sub { font-size: 1rem; }
+  .section-title { font-size: 1.5rem; }
+  .section-desc { font-size: 0.95rem; }
+
+  .tier-card { padding: 1.25rem; }
+  .feature-card { padding: 1.25rem; }
+
+  .score-bar-label { min-width: 45px; font-size: 0.7rem; }
+  .score-bar-value { font-size: 0.7rem; }
+}
 </style>
 </head>
 
