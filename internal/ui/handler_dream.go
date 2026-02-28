@@ -46,7 +46,11 @@ func (s *Server) handleDreamEvents(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case entry := <-ch:
+		case entry, ok := <-ch:
+			if !ok {
+				slog.Debug("dream SSE broker closed")
+				return
+			}
 			var signals []string
 			if entry.RiskSignals != "" && entry.RiskSignals != "[]" {
 				_ = json.Unmarshal([]byte(entry.RiskSignals), &signals)

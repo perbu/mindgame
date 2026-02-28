@@ -20,6 +20,16 @@ func NewBroker() *Broker {
 	}
 }
 
+// Close closes all subscriber channels, causing SSE handlers to exit.
+func (b *Broker) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, ch := range b.subscribers {
+		close(ch)
+		delete(b.subscribers, id)
+	}
+}
+
 // Publish sends an audit entry to all subscribers. Non-blocking: slow readers miss entries.
 func (b *Broker) Publish(entry *db.AuditEntry) {
 	b.mu.RLock()

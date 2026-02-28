@@ -36,7 +36,11 @@ func (s *Server) handleFeedSSE(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case entry := <-ch:
+		case entry, ok := <-ch:
+			if !ok {
+				slog.Debug("SSE feed broker closed")
+				return
+			}
 			html, err := renderToString(r.Context(), templates.FeedRow(*entry))
 			if err != nil {
 				slog.Error("SSE render error", "error", err)

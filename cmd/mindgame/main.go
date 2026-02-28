@@ -180,6 +180,9 @@ func main() {
 	<-ctx.Done()
 	slog.Info("shutting down")
 
+	// Close broker first so SSE handlers exit and connections drain.
+	broker.Close()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := proxySrv.Shutdown(shutdownCtx); err != nil {
