@@ -52,6 +52,10 @@ func NewServer(store *db.Store, pol *policy.Cache, reloadScorer func() error, br
 	s.mux.HandleFunc("GET /stats", s.handleStats)
 	s.mux.HandleFunc("GET /stats/data", s.handleStatsData)
 
+	// Dream mode
+	s.mux.HandleFunc("GET /dream", s.handleDream)
+	s.mux.HandleFunc("GET /dream/events", s.handleDreamEvents)
+
 	// Static assets
 	staticSub, _ := fs.Sub(staticFS, "static")
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))

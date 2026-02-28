@@ -283,6 +283,84 @@ func TestFeedSSE(t *testing.T) {
 	}
 }
 
+func TestDreamPage(t *testing.T) {
+	srv := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/dream", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("content-type = %q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<canvas") {
+		t.Error("missing <canvas> element")
+	}
+}
+
+func TestDreamSSE(t *testing.T) {
+	srv := setupTestServer(t)
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		srv.broker.Publish(&db.AuditEntry{
+			ID: 42, Timestamp: time.Now(), Method: "POST",
+			URL: "http://evil.com/hack", Host: "evil.com", Action: "BAN",
+			RiskScore: 25, RiskSignals: `["suspicious_path","large_body"]`,
+			ReqBody: "payload-data",
+		})
+	}()
+
+	client := &http.Client{
+		Transport: &http.Transport{DisableCompression: true},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/dream/events", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("SSE request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Errorf("content-type = %q, want text/event-stream", resp.Header.Get("Content-Type"))
+	}
+
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	body := string(buf[:n])
+
+	if !strings.Contains(body, "event: audit") {
+		t.Errorf("missing event type, got: %q", body)
+	}
+	if !strings.Contains(body, `"host":"evil.com"`) {
+		t.Errorf("missing host field, got: %q", body)
+	}
+	if !strings.Contains(body, `"action":"BAN"`) {
+		t.Errorf("missing action field, got: %q", body)
+	}
+	if !strings.Contains(body, `"score":25`) {
+		t.Errorf("missing score field, got: %q", body)
+	}
+	if !strings.Contains(body, `"bodySize":12`) {
+		t.Errorf("missing/wrong bodySize, got: %q", body)
+	}
+	if !strings.Contains(body, `"suspicious_path"`) {
+		t.Errorf("missing signals, got: %q", body)
+	}
+}
+
 func TestFeedDetail(t *testing.T) {
 	srv := setupTestServer(t)
 

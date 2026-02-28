@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mindgame — dream mode</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0f; cursor: none; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+(() => {
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+// --- Resize ---
+function resize() {
+    canvas.width = window.innerWidth * devicePixelRatio;
+    canvas.height = window.innerHeight * devicePixelRatio;
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+}
+resize();
+window.addEventListener("resize", resize);
+
+const W = () => window.innerWidth;
+const H = () => window.innerHeight;
+
+// --- Exit ---
+document.addEventListener("click", () => { window.location.href = "/"; });
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") window.location.href = "/";
+});
+
+// --- Color by score ---
+function scoreColor(score) {
+    if (score === 0) return "#8899cc";
+    if (score <= 5)  return "#34d4b4";
+    if (score <= 9)  return "#fbbf24";
+    if (score <= 19) return "#f87171";
+    return "#ff2020";
+}
+
+// --- Particle pool ---
+const MAX_PARTICLES = 500;
+const particles = [];
+for (let i = 0; i < MAX_PARTICLES; i++) {
+    particles.push({ alive: false });
+}
+
+function spawnParticle(ev) {
+    // Find dead slot
+    let p = null;
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+        if (!particles[i].alive) { p = particles[i]; break; }
+    }
+    if (!p) return; // pool full
+
+    const w = W(), h = H();
+    p.alive = true;
+    p.x = w + 10;
+    p.y = 40 + Math.random() * (h - 80);
+    p.radius = 3 + Math.log2(Math.max(ev.bodySize, 1));
+    p.color = scoreColor(ev.score);
+    p.score = ev.score;
+    p.action = ev.action;
+    p.host = ev.host;
+    p.alpha = 1.0;
+    p.age = 0;
+    p.maxAge = 300; // ~5s at 60fps
+    p.vx = -(1.5 + Math.random() * 1.5);
+    p.vy = (Math.random() - 0.5) * 0.6;
+    p.glow = ev.score >= 20;
+    p.fragment = false;
+
+    // Action behaviors
+    if (ev.action === "DENY") {
+        // Shatter immediately
+        p.maxAge = 60;
+        shatter(p, 5 + Math.floor(Math.random() * 4));
+        p.alive = false;
+    } else if (ev.action === "REJECT") {
+        // Bounce back
+        p.vx = Math.abs(p.vx) * 0.8;
+        p.maxAge = 180;
+    } else if (ev.action === "BLOCK") {
+        p.maxAge = 60;
+        shatter(p, 3 + Math.floor(Math.random() * 3));
+        p.alive = false;
+    } else if (ev.action === "BAN") {
+        shatter(p, 5 + Math.floor(Math.random() * 4));
+        p.alive = false;
+        spawnFlare(p.x, p.y, ev.host);
+    }
+
+    // Track host position for ghost text
+    updateHostTracker(ev.host, p.y);
+}
+
+function shatter(src, count) {
+    for (let i = 0; i < count; i++) {
+        let fp = null;
+        for (let j = 0; j < MAX_PARTICLES; j++) {
+            if (!particles[j].alive) { fp = particles[j]; break; }
+        }
+        if (!fp) break;
+        fp.alive = true;
+        fp.x = src.x;
+        fp.y = src.y;
+        fp.radius = src.radius * (0.3 + Math.random() * 0.3);
+        fp.color = src.color;
+        fp.score = src.score;
+        fp.action = src.action;
+        fp.host = src.host;
+        fp.alpha = 0.9;
+        fp.age = 0;
+        fp.maxAge = 60 + Math.floor(Math.random() * 60);
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 4;
+        fp.vx = Math.cos(angle) * speed;
+        fp.vy = Math.sin(angle) * speed;
+        fp.glow = src.glow;
+        fp.fragment = true;
+    }
+}
+
+// --- Ban flares ---
+const flares = [];
+
+function spawnFlare(x, y, host) {
+    flares.push({
+        x: x, y: y, host: host,
+        radius: 0, maxRadius: Math.max(W(), H()) * 0.6,
+        alpha: 0.8, age: 0, maxAge: 120 // ~2s
+    });
+}
+
+function updateFlares() {
+    for (let i = flares.length - 1; i >= 0; i--) {
+        const f = flares[i];
+        f.age++;
+        const t = f.age / f.maxAge;
+        f.radius = f.maxRadius * t;
+        f.alpha = 0.8 * (1 - t);
+        if (f.age >= f.maxAge) {
+            flares.splice(i, 1);
+        }
+    }
+}
+
+function drawFlares() {
+    const cx = W() / 2, cy = H() / 2;
+    for (const f of flares) {
+        // Radial ring
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, f.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(255, 32, 32, ${f.alpha * 0.5})`;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        // Inner glow
+        const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.radius * 0.3);
+        grad.addColorStop(0, `rgba(255, 32, 32, ${f.alpha * 0.15})`);
+        grad.addColorStop(1, "rgba(255, 32, 32, 0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, f.radius * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Host text at center
+        if (f.alpha > 0.1) {
+            ctx.save();
+            ctx.globalAlpha = f.alpha;
+            ctx.fillStyle = "#ff2020";
+            ctx.font = "bold 48px monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(f.host, cx, cy);
+            ctx.restore();
+        }
+    }
+}
+
+// --- RPM tracking ---
+const rpmWindow = []; // timestamps of recent events
+const RPM_WINDOW_MS = 60000;
+
+function recordEvent() {
+    rpmWindow.push(performance.now());
+}
+
+function getRPM() {
+    const now = performance.now();
+    while (rpmWindow.length > 0 && now - rpmWindow[0] > RPM_WINDOW_MS) {
+        rpmWindow.shift();
+    }
+    return rpmWindow.length; // events in last 60s
+}
+
+function getRPS() {
+    return getRPM() / 60;
+}
+
+// --- Ambient hum ---
+let humHue = 200;
+
+function drawHum() {
+    const w = W(), h = H();
+    const rps = getRPS();
+    const humHeight = 20;
+    const y = h - humHeight;
+
+    // Brightness: min 0.05, scales with rps
+    let brightness = 0.05 + Math.min(rps / 50, 1) * 0.4;
+
+    // Slow hue rotation to prevent burn-in
+    humHue = (humHue + 0.1) % 360;
+
+    const grad = ctx.createLinearGradient(0, y, 0, h);
+    grad.addColorStop(0, "transparent");
+    grad.addColorStop(0.3, `hsla(${humHue}, 60%, 50%, ${brightness * 0.5})`);
+    grad.addColorStop(1, `hsla(${humHue}, 60%, 50%, ${brightness})`);
+
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, y, w, humHeight);
+}
+
+// --- Ghost text (host labels) ---
+const hostTracker = {}; // host -> { count, lastY, lastSeen }
+
+function updateHostTracker(host, y) {
+    const now = performance.now();
+    if (!hostTracker[host]) {
+        hostTracker[host] = { count: 0, lastY: y, lastSeen: now };
+    }
+    hostTracker[host].count++;
+    hostTracker[host].lastY = y;
+    hostTracker[host].lastSeen = now;
+}
+
+function drawGhostText() {
+    const now = performance.now();
+    // Decay old hosts
+    for (const host in hostTracker) {
+        if (now - hostTracker[host].lastSeen > 30000) {
+            delete hostTracker[host];
+        }
+    }
+
+    // Top 5 by count
+    const sorted = Object.entries(hostTracker)
+        .sort((a, b) => b[1].count - a[1].count)
+        .slice(0, 5);
+
+    ctx.save();
+    ctx.font = "14px monospace";
+    ctx.textAlign = "left";
+    for (const [host, data] of sorted) {
+        // Drift slowly
+        data.lastY += (Math.random() - 0.5) * 0.3;
+        data.lastY = Math.max(30, Math.min(H() - 40, data.lastY));
+
+        const age = (now - data.lastSeen) / 30000; // 0..1
+        const alpha = Math.max(0.05, 0.15 * (1 - age));
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = "#aaccee";
+        ctx.fillText(host, 20, data.lastY);
+    }
+    ctx.restore();
+}
+
+// --- Scaling ---
+let aggregateMode = false;
+let streakBrightness = 0;
+
+function updateScaling() {
+    const rps = getRPS();
+    aggregateMode = rps > 500;
+
+    if (aggregateMode) {
+        streakBrightness = Math.min(1, rps / 1000);
+    }
+
+    // Shrink particles slightly at high rates
+    return rps > 50 ? 0.7 : 1.0;
+}
+
+function drawStreaks() {
+    if (!aggregateMode) return;
+    const w = W(), h = H();
+    ctx.save();
+    ctx.globalAlpha = streakBrightness * 0.3;
+    // Draw bright horizontal streaks
+    for (let i = 0; i < 8; i++) {
+        const y = 40 + Math.random() * (h - 80);
+        const grad = ctx.createLinearGradient(w, y, 0, y);
+        grad.addColorStop(0, "#34d4b4");
+        grad.addColorStop(0.5, "#fbbf24");
+        grad.addColorStop(1, "transparent");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, y - 2, w, 4);
+    }
+    ctx.restore();
+}
+
+// --- Background fade with subtle tint ---
+let bgTintHue = 0;
+
+function drawBackground() {
+    const w = W(), h = H();
+    bgTintHue = (bgTintHue + 0.05) % 360;
+
+    // Semi-transparent rect for trails
+    ctx.fillStyle = `rgba(10, 10, 15, 0.15)`;
+    ctx.fillRect(0, 0, w, h);
+
+    // Very subtle tint overlay
+    ctx.save();
+    ctx.globalAlpha = 0.01;
+    ctx.fillStyle = `hsl(${bgTintHue}, 30%, 10%)`;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+}
+
+// --- Main loop ---
+let frame = 0;
+
+function update() {
+    const scaleFactor = updateScaling();
+
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+        const p = particles[i];
+        if (!p.alive) continue;
+
+        p.age++;
+        p.x += p.vx;
+        p.y += p.vy;
+
+        // Gentle Y drift for ALLOW
+        if (!p.fragment && p.action === "ALLOW") {
+            p.vy += (Math.random() - 0.5) * 0.05;
+            p.vy *= 0.99; // dampen
+        }
+
+        // Fragment deceleration
+        if (p.fragment) {
+            p.vx *= 0.96;
+            p.vy *= 0.96;
+        }
+
+        // Alpha fade
+        const lifeRatio = p.age / p.maxAge;
+        p.alpha = Math.max(0, 1 - lifeRatio);
+
+        // Kill if off-screen or expired
+        if (p.age >= p.maxAge || p.x < -50 || p.x > W() + 50 || p.y < -50 || p.y > H() + 50) {
+            p.alive = false;
+        }
+    }
+
+    updateFlares();
+}
+
+function draw() {
+    const w = W(), h = H();
+
+    drawBackground();
+
+    // Ambient hum
+    drawHum();
+
+    // Streaks for storm mode
+    drawStreaks();
+
+    // Particles
+    const scaleFactor = updateScaling();
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+        const p = particles[i];
+        if (!p.alive) continue;
+
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+
+        const r = p.radius * scaleFactor;
+
+        // Glow for high-score particles
+        if (p.glow) {
+            ctx.shadowColor = p.color;
+            ctx.shadowBlur = r * 3;
+        }
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    // Ban flares
+    drawFlares();
+
+    // Ghost text
+    drawGhostText();
+}
+
+function loop() {
+    frame++;
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// --- SSE connection ---
+function connect() {
+    const es = new EventSource("/dream/events");
+    es.addEventListener("audit", (e) => {
+        try {
+            const ev = JSON.parse(e.data);
+            recordEvent();
+            if (!aggregateMode) {
+                spawnParticle(ev);
+            }
+        } catch (err) {
+            console.error("dream: parse error", err);
+        }
+    });
+    es.onerror = () => {
+        es.close();
+        // Reconnect after a delay
+        setTimeout(connect, 3000);
+    };
+}
+
+// --- Initial full black fill ---
+ctx.fillStyle = "#0a0a0f";
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+connect();
+loop();
+})();
+</script>
+</body>
+</html>
