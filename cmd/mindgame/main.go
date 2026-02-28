@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,7 +21,11 @@ import (
 	"github.com/perbu/mindgame/internal/ui"
 )
 
+//go:embed .version
+var version string
+
 func main() {
+	log.Printf("mindgame %s", strings.TrimSpace(version))
 	addr := flag.String("addr", ":8080", "listen address")
 	uiAddr := flag.String("ui-addr", ":9090", "UI dashboard listen address")
 	dbPath := flag.String("db", "audit.db", "path to SQLite database")
