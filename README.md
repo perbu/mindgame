@@ -19,20 +19,20 @@ Risk scoring uses CEL expressions. Requests scoring 10+ are blocked. Requests sc
 ### Docker
 
 ```bash
-docker run -p 8080:8080 -p 9090:9090 -v mindgame-data:/data ghcr.io/perbu/mindgame
+docker run -p 2080:2080 -p 2180:2180 -v mindgame-data:/data ghcr.io/perbu/mindgame
 ```
 
 ### From source
 
 ```
 go build ./cmd/mindgame
-./mindgame -addr :8080 -db audit.db -ui-addr :9090
+./mindgame -addr :2080 -db audit.db -ui-addr :2180
 ```
 
 First run generates `ca.pem` and `ca.key`. Agents can fetch the CA certificate directly from the proxy:
 
 ```bash
-curl http://localhost:8080/ca.pem -o ca.pem
+curl http://localhost:2080/ca.pem -o ca.pem
 ```
 
 Add the CA to your agent's trust store:
@@ -51,8 +51,8 @@ cp ca.pem /usr/local/share/ca-certificates/mindgame.crt && update-ca-certificate
 Point the agent at the proxy:
 
 ```bash
-export http_proxy=http://localhost:8080
-export https_proxy=http://localhost:8080
+export http_proxy=http://localhost:2080
+export https_proxy=http://localhost:2080
 ```
 
 Seed domain rules from a file:
@@ -69,17 +69,17 @@ allow api.openai.com
 deny evil.example.com
 ```
 
-Rules are stored in SQLite and editable via the web UI at `http://localhost:9090/domains`.
+Rules are stored in SQLite and editable via the web UI at `http://localhost:2180/domains`.
 
 Allowlist your LLM provider, e.g. `api.anthropic.com` or `api.openai.com`. Without an allow rule, model API calls will all be logged and scored, filling up your audit database with uninteresting traffic.
 
 ## Scoring Rules
 
-Risk scoring uses [CEL](https://github.com/google/cel-spec) expressions stored in the database. Default rules flag sensitive paths, credential patterns, confidential keywords, and large outbound payloads. Add, edit, or disable rules via the web UI at `http://localhost:9090/scoring`.
+Risk scoring uses [CEL](https://github.com/google/cel-spec) expressions stored in the database. Default rules flag sensitive paths, credential patterns, confidential keywords, and large outbound payloads. Add, edit, or disable rules via the web UI at `http://localhost:2180/scoring`.
 
 ## Web UI
 
-`http://localhost:9090`
+`http://localhost:2180`
 
 - Live Feed — real-time request stream via SSE, filterable by action/host/score
 - Domain Rules — manage allow/deny list, review bans

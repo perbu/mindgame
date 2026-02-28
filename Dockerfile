@@ -7,5 +7,5 @@ FROM alpine:3
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /mindgame /usr/local/bin/mindgame
 RUN mkdir /data
-EXPOSE 8080 9090
+EXPOSE 2080 2180
 ENTRYPOINT ["mindgame", "-db", "/data/audit.db", "-ca-dir", "/data"]

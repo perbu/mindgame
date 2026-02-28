@@ -725,7 +725,7 @@ footer {
         <g class="node-pulse">
           <rect x="320" y="130" width="170" height="100" rx="12" fill="#121a2c" stroke="#00e87b" stroke-width="2"/>
           <text x="405" y="168" font-family="Syne, sans-serif" font-size="16" font-weight="700" fill="#00e87b" text-anchor="middle">mindgame</text>
-          <text x="405" y="189" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">:8080 proxy / :9090 ui</text>
+          <text x="405" y="189" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">:2080 proxy / :2180 ui</text>
           <text x="405" y="216" font-family="IBM Plex Mono, monospace" font-size="10" fill="#4e6282" text-anchor="middle">audit.db</text>
         </g>
 
@@ -1006,7 +1006,7 @@ footer {
         <span class="code-filename">standalone</span>
       </div>
       <pre><span class="cc"># Run with a persistent volume</span>
-<span class="cv">$</span> <span class="cs">docker run -p 8080:8080 -p 9090:9090 -v mindgame-data:/data ghcr.io/perbu/mindgame</span></pre>
+<span class="cv">$</span> <span class="cs">docker run -p 2080:2080 -p 2180:2180 -v mindgame-data:/data ghcr.io/perbu/mindgame</span></pre>
     </div>
 
     <div class="code-block reveal reveal-d4">
@@ -1018,7 +1018,7 @@ footer {
   <span class="cv">mindgame</span>:
     <span class="ck">image</span>: <span class="cs">ghcr.io/perbu/mindgame:latest</span>
     <span class="ck">ports</span>:
-      - <span class="cs">"9090:9090"</span>  <span class="cc"># Web UI</span>
+      - <span class="cs">"2180:2180"</span>  <span class="cc"># Web UI</span>
     <span class="ck">volumes</span>:
       - <span class="cs">./data:/data</span>
     <span class="ck">networks</span>:
@@ -1028,8 +1028,8 @@ footer {
   <span class="cv">agent</span>:
     <span class="ck">image</span>: <span class="cs">your-agent:latest</span>
     <span class="ck">environment</span>:
-      - <span class="cv">http_proxy</span>=<span class="cs">http://mindgame:8080</span>
-      - <span class="cv">https_proxy</span>=<span class="cs">http://mindgame:8080</span>
+      - <span class="cv">http_proxy</span>=<span class="cs">http://mindgame:2080</span>
+      - <span class="cv">https_proxy</span>=<span class="cs">http://mindgame:2080</span>
       - <span class="cv">NODE_EXTRA_CA_CERTS</span>=<span class="cs">/certs/ca.pem</span>
     <span class="ck">volumes</span>:
       - <span class="cs">./data/ca.pem:/certs/ca.pem:ro</span>

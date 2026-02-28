@@ -27,8 +27,8 @@ var version string
 
 func main() {
 	defaults := proxy.DefaultBodyLimits()
-	addr := flag.String("addr", ":8080", "listen address")
-	uiAddr := flag.String("ui-addr", ":9090", "UI dashboard listen address")
+	addr := flag.String("addr", ":2080", "listen address")
+	uiAddr := flag.String("ui-addr", ":2180", "UI dashboard listen address")
 	dbPath := flag.String("db", "audit.db", "path to SQLite database")
 	caDir := flag.String("ca-dir", ".", "directory for CA certificate and key")
 	seedPath := flag.String("seed", "", "path to seed file with domain rules")
