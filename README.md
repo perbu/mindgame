@@ -4,13 +4,13 @@ MITM audit proxy for AI agents. Intercepts HTTPS traffic, enforces intent declar
 
 ## What It Does
 
-Mindgame sits between your AI agent and the internet. It decrypts TLS traffic, requires agents to state why they're making each request (via an `X-Reason` header), and logs everything to SQLite.
+Mindgame sits between your AI agent and the internet. It decrypts TLS traffic, requires agents to state why they're making each request via an `X-Reason` header, and logs everything to SQLite.
 
 Domains are classified into three tiers:
 
-- **Allow** — trusted (e.g., model APIs). Forwarded without requiring `X-Reason`.
-- **Deny** — blocked outright.
-- **Default** — everything else. Requires `X-Reason`. Scored for risk.
+- Allow — trusted, e.g. model APIs. Forwarded without requiring `X-Reason`.
+- Deny — blocked outright.
+- Default — everything else. Requires `X-Reason`. Scored for risk.
 
 Risk scoring uses CEL expressions. Requests scoring 10+ are blocked. Requests scoring 20+ ban the host until a human reviews it.
 
@@ -44,7 +44,7 @@ export NODE_EXTRA_CA_CERTS=./ca.pem
 # Python
 export REQUESTS_CA_BUNDLE=./ca.pem
 
-# System (Debian/Ubuntu)
+# System — Debian/Ubuntu
 cp ca.pem /usr/local/share/ca-certificates/mindgame.crt && update-ca-certificates
 ```
 
@@ -71,7 +71,7 @@ deny evil.example.com
 
 Rules are stored in SQLite and editable via the web UI at `http://localhost:9090/domains`.
 
-> **Tip:** Allowlist your LLM provider (e.g., `api.anthropic.com`, `api.openai.com`). AI agents make frequent, large calls to model APIs — without an allow rule these will all be logged and scored, quickly filling up your audit database with uninteresting traffic.
+Allowlist your LLM provider, e.g. `api.anthropic.com` or `api.openai.com`. Without an allow rule, model API calls will all be logged and scored, filling up your audit database with uninteresting traffic.
 
 ## Scoring Rules
 
@@ -81,13 +81,13 @@ Risk scoring uses [CEL](https://github.com/google/cel-spec) expressions stored i
 
 `http://localhost:9090`
 
-- **Live Feed** — real-time request stream via SSE, filterable by action/host/score
-- **Domain Rules** — manage allow/deny list, review bans
-- **Scoring Rules** — edit CEL expressions, test rules against sample requests
-- **Statistics** — request rates, top hosts, rule hit frequency
-- **Dream Mode** (`/dream`) — ambient full-screen visualization for NOC displays
+- Live Feed — real-time request stream via SSE, filterable by action/host/score
+- Domain Rules — manage allow/deny list, review bans
+- Scoring Rules — edit CEL expressions, test rules against sample requests
+- Statistics — request rates, top hosts, rule hit frequency
+- Dream Mode at `/dream` — ambient full-screen visualization for NOC displays
 
-## Querying the Audit Log
+## Querying the Audit Log directly
 
 ```sql
 -- Recent blocked requests
