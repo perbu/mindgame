@@ -47,6 +47,28 @@ func setupTest(t *testing.T) (*Handler, *db.Store, *policy.Cache) {
 	return New(store, authority, pol, scorer), store, pol
 }
 
+func TestServeCACert(t *testing.T) {
+	handler, _, _ := setupTest(t)
+
+	// Direct request (relative URL) to /ca.pem.
+	req := httptest.NewRequest("GET", "/ca.pem", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-pem-file" {
+		t.Errorf("Content-Type = %q, want application/x-pem-file", ct)
+	}
+	if !bytes.HasPrefix(body, []byte("-----BEGIN CERTIFICATE-----")) {
+		t.Errorf("body does not look like PEM: %q", string(body[:40]))
+	}
+}
+
 func TestHandleHTTPForward(t *testing.T) {
 	handler, store, _ := setupTest(t)
 

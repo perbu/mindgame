@@ -82,6 +82,15 @@ func (h *Handler) SetTransport(rt http.RoundTripper) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Direct (non-proxied) requests have a relative URL. Serve the CA
+	// certificate so agents can bootstrap trust without out-of-band setup.
+	if !r.URL.IsAbs() && r.URL.Path == "/ca.pem" {
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.Header().Set("Content-Disposition", "attachment; filename=mindgame-ca.pem")
+		w.Write(h.ca.CertPEM())
+		return
+	}
+
 	if r.Method == http.MethodConnect {
 		h.handleConnect(w, r)
 	} else {
