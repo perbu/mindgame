@@ -44,7 +44,7 @@ func setupTest(t *testing.T) (*Handler, *db.Store, *policy.Cache) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	return New(store, authority, pol, scorer), store, pol
+	return New(store, authority, pol, scorer, DefaultBodyLimits()), store, pol
 }
 
 func TestServeCACert(t *testing.T) {

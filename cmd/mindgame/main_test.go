@@ -53,7 +53,7 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer)
+	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
 
 	// 3. Start proxy on a random port.
 	proxyServer := httptest.NewServer(handler)
@@ -105,8 +105,8 @@ func TestIntegrationHTTPProxy(t *testing.T) {
 	if e.Action != "ALLOW" {
 		t.Errorf("audit action = %q, want ALLOW", e.Action)
 	}
-	if e.RespBody != "origin response" {
-		t.Errorf("audit resp_body = %q, want %q", e.RespBody, "origin response")
+	if string(e.RespBody) != "origin response" {
+		t.Errorf("audit resp_body = %q, want %q", string(e.RespBody), "origin response")
 	}
 }
 
@@ -142,7 +142,7 @@ func TestIntegrationCONNECT(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol2, scorer2)
+	handler := proxy.New(store, authority, pol2, scorer2, proxy.DefaultBodyLimits())
 	// Let the proxy trust the httptest backend's self-signed cert.
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -192,8 +192,8 @@ func TestIntegrationCONNECT(t *testing.T) {
 	if e.Method != "GET" {
 		t.Errorf("audit method = %q, want GET", e.Method)
 	}
-	if e.RespBody != "tls-intercepted" {
-		t.Errorf("audit resp_body = %q, want %q", e.RespBody, "tls-intercepted")
+	if string(e.RespBody) != "tls-intercepted" {
+		t.Errorf("audit resp_body = %q, want %q", string(e.RespBody), "tls-intercepted")
 	}
 	if e.Reason != "connect integration test" {
 		t.Errorf("audit reason = %q, want %q", e.Reason, "connect integration test")

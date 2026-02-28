@@ -47,7 +47,7 @@ func setup(t *testing.T) *Harness {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer)
+	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
 	// Let the proxy trust httptest backends' self-signed certs.
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -343,8 +343,8 @@ func TestMITMInterception(t *testing.T) {
 	if e.Method != "GET" {
 		t.Errorf("audit method = %q, want GET", e.Method)
 	}
-	if e.RespBody != "secret-mitm-content" {
-		t.Errorf("audit resp_body = %q, want %q", e.RespBody, "secret-mitm-content")
+	if string(e.RespBody) != "secret-mitm-content" {
+		t.Errorf("audit resp_body = %q, want %q", string(e.RespBody), "secret-mitm-content")
 	}
 	if e.Reason != "mitm test" {
 		t.Errorf("audit reason = %q, want %q", e.Reason, "mitm test")
@@ -415,10 +415,21 @@ func TestMITMMultipleRequestsOneTunnel(t *testing.T) {
 		t.Errorf("backend received %d requests, want 2", reqCount)
 	}
 
-	// Verify both requests were logged.
-	entries, err := h.store.ListAuditEntries(10)
-	if err != nil {
-		t.Fatalf("ListAuditEntries: %v", err)
+	// Verify both requests were logged. The audit entry for the last
+	// response is inserted after streaming completes, so poll briefly.
+	var (
+		entries []db.AuditEntry
+		err     error
+	)
+	for range 50 {
+		entries, err = h.store.ListAuditEntries(10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(entries) != 2 {
 		t.Errorf("expected 2 audit entries, got %d", len(entries))
@@ -494,7 +505,7 @@ func setupStandalone(t *testing.T, backendHandler http.Handler) (*db.Store, *pol
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer)
+	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -600,7 +611,7 @@ func TestMITMDenyAtConnect(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer)
+	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -668,7 +679,7 @@ func TestMITMAllowWithoutReason(t *testing.T) {
 		t.Fatalf("scoring.New: %v", err)
 	}
 
-	handler := proxy.New(store, authority, pol, scorer)
+	handler := proxy.New(store, authority, pol, scorer, proxy.DefaultBodyLimits())
 	handler.SetTransport(&http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	})
@@ -807,6 +818,8 @@ func TestScoringLargePost(t *testing.T) {
 	defer resp.Body.Close()
 
 	// Score 3 → still forwarded (< 10).
+	// Must read response body so the proxy finishes streaming and inserts audit entry.
+	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}

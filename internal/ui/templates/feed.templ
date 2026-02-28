@@ -2,6 +2,7 @@ package templates
 
 import (
 	"fmt"
+	"unicode/utf8"
 	"github.com/perbu/mindgame/internal/db"
 )
 
@@ -90,22 +91,29 @@ templ FeedDetail(e *db.AuditEntry) {
 				}
 				<dt>Request Headers</dt>
 				<dd><pre>{ e.ReqHeaders }</pre></dd>
-				if e.ReqBody != "" {
+				if len(e.ReqBody) > 0 {
 					<dt>Request Body</dt>
-					<dd><pre>{ truncateString(e.ReqBody, 2000) }</pre></dd>
+					<dd><pre>{ truncateBody(e.ReqBody, 2000) }</pre></dd>
 				}
-				if e.RespBody != "" {
+				if len(e.RespBody) > 0 {
 					<dt>Response Body</dt>
-					<dd><pre>{ truncateString(e.RespBody, 2000) }</pre></dd>
+					<dd><pre>{ truncateBody(e.RespBody, 2000) }</pre></dd>
 				}
 			</dl>
 		</div>
 	</td>
 }
 
-func truncateString(s string, max int) string {
-	if len(s) <= max {
-		return s
+func truncateBody(b []byte, max int) string {
+	if len(b) == 0 {
+		return ""
 	}
-	return s[:max] + "..."
+	if utf8.Valid(b) {
+		s := string(b)
+		if len(s) <= max {
+			return s
+		}
+		return s[:max] + "..."
+	}
+	return fmt.Sprintf("[binary, %d bytes]", len(b))
 }

@@ -315,7 +315,7 @@ func TestDreamSSE(t *testing.T) {
 			ID: 42, Timestamp: time.Now(), Method: "POST",
 			URL: "http://evil.com/hack", Host: "evil.com", Action: "BAN",
 			RiskScore: 25, RiskSignals: `["suspicious_path","large_body"]`,
-			ReqBody: "payload-data",
+			ReqBody: []byte("payload-data"), ReqBodySize: 12,
 		})
 	}()
 

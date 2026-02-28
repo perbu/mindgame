@@ -25,14 +25,15 @@ func (r Result) SignalsJSON() string {
 
 // RequestVars holds the variables available to CEL expressions.
 type RequestVars struct {
-	Method   string
-	URL      string
-	Host     string
-	Path     string
-	Body     string
-	BodySize int
-	Reason   string
-	Headers  map[string]string
+	Method       string
+	URL          string
+	Host         string
+	Path         string
+	Body         string
+	BodySize     int
+	BodyIsBinary bool
+	Reason       string
+	Headers      map[string]string
 }
 
 type compiledRule struct {
@@ -56,6 +57,7 @@ func New(rules []db.ScoringRule) (*Engine, error) {
 		cel.Variable("path", cel.StringType),
 		cel.Variable("body", cel.StringType),
 		cel.Variable("body_size", cel.IntType),
+		cel.Variable("body_is_binary", cel.BoolType),
 		cel.Variable("headers", cel.MapType(cel.StringType, cel.StringType)),
 		cel.Variable("reason", cel.StringType),
 	)
@@ -95,14 +97,15 @@ func (e *Engine) Eval(vars RequestVars) Result {
 	}
 
 	activation := map[string]any{
-		"method":    vars.Method,
-		"url":       vars.URL,
-		"host":      vars.Host,
-		"path":      vars.Path,
-		"body":      vars.Body,
-		"body_size": int64(vars.BodySize),
-		"headers":   vars.Headers,
-		"reason":    vars.Reason,
+		"method":         vars.Method,
+		"url":            vars.URL,
+		"host":           vars.Host,
+		"path":           vars.Path,
+		"body":           vars.Body,
+		"body_size":      int64(vars.BodySize),
+		"body_is_binary": vars.BodyIsBinary,
+		"headers":        vars.Headers,
+		"reason":         vars.Reason,
 	}
 
 	var result Result

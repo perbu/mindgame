@@ -26,12 +26,20 @@ var version string
 
 func main() {
 	log.Printf("mindgame %s", strings.TrimSpace(version))
+	defaults := proxy.DefaultBodyLimits()
 	addr := flag.String("addr", ":8080", "listen address")
 	uiAddr := flag.String("ui-addr", ":9090", "UI dashboard listen address")
 	dbPath := flag.String("db", "audit.db", "path to SQLite database")
 	caDir := flag.String("ca-dir", ".", "directory for CA certificate and key")
 	seedPath := flag.String("seed", "", "path to seed file with domain rules")
+	maxTextLog := flag.Int("max-text-log", defaults.MaxTextLog, "max bytes to log for text bodies")
+	maxBinaryLog := flag.Int("max-binary-log", defaults.MaxBinaryLog, "max bytes to log for binary bodies")
 	flag.Parse()
+
+	limits := proxy.BodyLimits{
+		MaxTextLog:   *maxTextLog,
+		MaxBinaryLog: *maxBinaryLog,
+	}
 
 	store, err := db.Open(*dbPath)
 	if err != nil {
@@ -85,7 +93,7 @@ func main() {
 	}
 	log.Printf("scoring engine loaded with %d rules", scorer.RuleCount())
 
-	handler := proxy.New(store, authority, pol, scorer)
+	handler := proxy.New(store, authority, pol, scorer, limits)
 
 	// SSE broker connects proxy audit writes to the UI live feed.
 	broker := ui.NewBroker()

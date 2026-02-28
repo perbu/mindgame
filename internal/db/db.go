@@ -21,19 +21,21 @@ type DomainRule struct {
 
 // AuditEntry represents a single row in the audit_log table.
 type AuditEntry struct {
-	ID          int64
-	Timestamp   time.Time
-	Method      string
-	URL         string
-	Host        string
-	Reason      string
-	ReqHeaders  string
-	ReqBody     string
-	RespStatus  int
-	RespBody    string
-	RiskScore   int
-	RiskSignals string
-	Action      string
+	ID           int64
+	Timestamp    time.Time
+	Method       string
+	URL          string
+	Host         string
+	Reason       string
+	ReqHeaders   string
+	ReqBody      []byte
+	ReqBodySize  int64
+	RespStatus   int
+	RespBody     []byte
+	RespBodySize int64
+	RiskScore    int
+	RiskSignals  string
+	Action       string
 }
 
 // Store wraps a SQLite database connection.
@@ -43,19 +45,21 @@ type Store struct {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS audit_log (
-	id           INTEGER PRIMARY KEY AUTOINCREMENT,
-	timestamp    DATETIME NOT NULL,
-	method       TEXT NOT NULL,
-	url          TEXT NOT NULL,
-	host         TEXT NOT NULL,
-	reason       TEXT NOT NULL DEFAULT '',
-	req_headers  TEXT NOT NULL DEFAULT '',
-	req_body     TEXT NOT NULL DEFAULT '',
-	resp_status  INTEGER NOT NULL DEFAULT 0,
-	resp_body    TEXT NOT NULL DEFAULT '',
-	risk_score   INTEGER NOT NULL DEFAULT 0,
-	risk_signals TEXT NOT NULL DEFAULT '[]',
-	action       TEXT NOT NULL DEFAULT 'ALLOW'
+	id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	timestamp      DATETIME NOT NULL,
+	method         TEXT NOT NULL,
+	url            TEXT NOT NULL,
+	host           TEXT NOT NULL,
+	reason         TEXT NOT NULL DEFAULT '',
+	req_headers    TEXT NOT NULL DEFAULT '',
+	req_body       BLOB NOT NULL DEFAULT x'',
+	req_body_size  INTEGER NOT NULL DEFAULT 0,
+	resp_status    INTEGER NOT NULL DEFAULT 0,
+	resp_body      BLOB NOT NULL DEFAULT x'',
+	resp_body_size INTEGER NOT NULL DEFAULT 0,
+	risk_score     INTEGER NOT NULL DEFAULT 0,
+	risk_signals   TEXT NOT NULL DEFAULT '[]',
+	action         TEXT NOT NULL DEFAULT 'ALLOW'
 );
 
 CREATE TABLE IF NOT EXISTS domain_rules (
@@ -89,6 +93,13 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Add columns for existing databases (ignore "duplicate column" errors).
+	for _, stmt := range []string{
+		`ALTER TABLE audit_log ADD COLUMN req_body_size INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE audit_log ADD COLUMN resp_body_size INTEGER NOT NULL DEFAULT 0`,
+	} {
+		_, _ = db.Exec(stmt)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -99,11 +110,20 @@ func (s *Store) Close() error {
 
 // InsertAuditEntry inserts an audit log entry and sets the ID on the entry.
 func (s *Store) InsertAuditEntry(e *AuditEntry) error {
+	// Normalize nil slices to empty — SQLite NOT NULL rejects SQL NULL.
+	reqBody := e.ReqBody
+	if reqBody == nil {
+		reqBody = []byte{}
+	}
+	respBody := e.RespBody
+	if respBody == nil {
+		respBody = []byte{}
+	}
 	res, err := s.db.Exec(`
-		INSERT INTO audit_log (timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Method, e.URL, e.Host, e.Reason, e.ReqHeaders, e.ReqBody,
-		e.RespStatus, e.RespBody, e.RiskScore, e.RiskSignals, e.Action,
+		INSERT INTO audit_log (timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Method, e.URL, e.Host, e.Reason, e.ReqHeaders, reqBody, e.ReqBodySize,
+		e.RespStatus, respBody, e.RespBodySize, e.RiskScore, e.RiskSignals, e.Action,
 	)
 	if err != nil {
 		return err
@@ -119,7 +139,7 @@ func (s *Store) InsertAuditEntry(e *AuditEntry) error {
 // ListAuditEntries returns the most recent audit log entries, up to limit.
 func (s *Store) ListAuditEntries(limit int) ([]AuditEntry, error) {
 	rows, err := s.db.Query(`
-		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action
 		FROM audit_log
 		ORDER BY id DESC
 		LIMIT ?`, limit)
@@ -132,7 +152,7 @@ func (s *Store) ListAuditEntries(limit int) ([]AuditEntry, error) {
 	for rows.Next() {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
-			&e.ReqHeaders, &e.ReqBody, &e.RespStatus, &e.RespBody,
+			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
 			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
 			return nil, err
 		}
@@ -371,10 +391,10 @@ func (s *Store) DeleteScoringRule(name string) error {
 func (s *Store) GetAuditEntry(id int64) (*AuditEntry, error) {
 	var e AuditEntry
 	err := s.db.QueryRow(`
-		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action
 		FROM audit_log WHERE id = ?`, id).
 		Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
-			&e.ReqHeaders, &e.ReqBody, &e.RespStatus, &e.RespBody,
+			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
 			&e.RiskScore, &e.RiskSignals, &e.Action)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -426,7 +446,7 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 		args = append(args, f.AfterID)
 	}
 
-	query := `SELECT id, timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action FROM audit_log`
+	query := `SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action FROM audit_log`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -449,7 +469,7 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 	for rows.Next() {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
-			&e.ReqHeaders, &e.ReqBody, &e.RespStatus, &e.RespBody,
+			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
 			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
 			return nil, err
 		}
@@ -548,7 +568,7 @@ func (s *Store) GetAuditStats(window time.Duration) (*AuditStats, error) {
 
 	// Recent bans.
 	rows, err = s.db.Query(`
-		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, resp_status, resp_body, risk_score, risk_signals, action
+		SELECT id, timestamp, method, url, host, reason, req_headers, req_body, req_body_size, resp_status, resp_body, resp_body_size, risk_score, risk_signals, action
 		FROM audit_log WHERE timestamp > ? AND action = 'BAN' ORDER BY id DESC LIMIT 10`, cutoff)
 	if err != nil {
 		return nil, err
@@ -556,7 +576,7 @@ func (s *Store) GetAuditStats(window time.Duration) (*AuditStats, error) {
 	for rows.Next() {
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Method, &e.URL, &e.Host, &e.Reason,
-			&e.ReqHeaders, &e.ReqBody, &e.RespStatus, &e.RespBody,
+			&e.ReqHeaders, &e.ReqBody, &e.ReqBodySize, &e.RespStatus, &e.RespBody, &e.RespBodySize,
 			&e.RiskScore, &e.RiskSignals, &e.Action); err != nil {
 			rows.Close()
 			return nil, err

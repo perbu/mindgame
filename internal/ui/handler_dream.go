@@ -54,6 +54,11 @@ func (s *Server) handleDreamEvents(w http.ResponseWriter, r *http.Request) {
 				signals = []string{}
 			}
 
+			bodySize := int(entry.ReqBodySize)
+			if bodySize <= 0 {
+				bodySize = len(entry.ReqBody)
+			}
+
 			ev := dreamEvent{
 				ID:       entry.ID,
 				TS:       entry.Timestamp.Format("15:04:05"),
@@ -62,7 +67,7 @@ func (s *Server) handleDreamEvents(w http.ResponseWriter, r *http.Request) {
 				Action:   entry.Action,
 				Score:    entry.RiskScore,
 				Signals:  signals,
-				BodySize: len(entry.ReqBody),
+				BodySize: bodySize,
 			}
 
 			data, err := json.Marshal(ev)

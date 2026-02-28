@@ -46,15 +46,17 @@ type Handler struct {
 	scorer    atomic.Pointer[scoring.Engine]
 	notifier  AuditNotifier
 	transport http.RoundTripper
+	limits    BodyLimits
 }
 
 // New creates a proxy handler backed by the given store, certificate authority,
-// policy cache, and scoring engine.
-func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.Engine) *Handler {
+// policy cache, scoring engine, and body capture limits.
+func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.Engine, limits BodyLimits) *Handler {
 	h := &Handler{
 		store:  store,
 		ca:     authority,
 		policy: pol,
+		limits: limits,
 		transport: &http.Transport{
 			DialContext:            (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -106,18 +108,10 @@ func requireReason(r *http.Request) error {
 	return nil
 }
 
-// forwardedResponse holds the buffered result of an upstream round-trip.
-type forwardedResponse struct {
-	statusCode int
-	header     http.Header
-	body       []byte
-}
-
-// forwardRequest sends an outbound request and logs it to the audit store.
-func (h *Handler) forwardRequest(r *http.Request, reqBody []byte, sr scoring.Result, action string) (*forwardedResponse, error) {
-	reqHeaders, _ := json.Marshal(r.Header)
-
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), nil)
+// doUpstream builds an outbound request and executes the round-trip.
+// The returned *http.Response has an unconsumed body that the caller must close.
+func (h *Handler) doUpstream(r *http.Request, body io.Reader, contentLength int64) (*http.Response, error) {
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), body)
 	if err != nil {
 		return nil, fmt.Errorf("bad request: %w", err)
 	}
@@ -131,57 +125,21 @@ func (h *Handler) forwardRequest(r *http.Request, reqBody []byte, sr scoring.Res
 		outReq.Header.Del(h)
 	}
 
-	if len(reqBody) > 0 {
-		outReq.Body = io.NopCloser(bytes.NewReader(reqBody))
-		outReq.ContentLength = int64(len(reqBody))
+	if contentLength >= 0 {
+		outReq.ContentLength = contentLength
 	}
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
 		return nil, fmt.Errorf("upstream error: %w", err)
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	entry := &db.AuditEntry{
-		Timestamp:   time.Now(),
-		Method:      r.Method,
-		URL:         r.URL.String(),
-		Host:        r.URL.Hostname(),
-		Reason:      r.Header.Get("X-Reason"),
-		ReqHeaders:  string(reqHeaders),
-		ReqBody:     string(reqBody),
-		RespStatus:  resp.StatusCode,
-		RespBody:    string(respBody),
-		RiskScore:   sr.Score,
-		RiskSignals: sr.SignalsJSON(),
-		Action:      action,
-	}
-	if err := h.store.InsertAuditEntry(entry); err != nil {
-		log.Printf("audit log error: %v", err)
-	} else if h.notifier != nil {
-		h.notifier.Publish(entry)
-	}
-
-	return &forwardedResponse{
-		statusCode: resp.StatusCode,
-		header:     resp.Header,
-		body:       respBody,
-	}, nil
+	return resp, nil
 }
 
 // logAction logs an audit entry for requests that are denied, rejected, blocked,
-// or banned (no upstream request made). Optional reqBody for BLOCK/BAN forensics.
-func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, reqBody ...[]byte) {
+// or banned (no upstream request made).
+func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, reqBody []byte, reqBodySize int64) {
 	reqHeaders, _ := json.Marshal(r.Header)
-	var body string
-	if len(reqBody) > 0 {
-		body = string(reqBody[0])
-	}
 	entry := &db.AuditEntry{
 		Timestamp:   time.Now(),
 		Method:      r.Method,
@@ -189,9 +147,8 @@ func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, r
 		Host:        r.URL.Hostname(),
 		Reason:      r.Header.Get("X-Reason"),
 		ReqHeaders:  string(reqHeaders),
-		ReqBody:     body,
-		RespStatus:  0,
-		RespBody:    "",
+		ReqBody:     reqBody,
+		ReqBodySize: reqBodySize,
 		RiskScore:   sr.Score,
 		RiskSignals: sr.SignalsJSON(),
 		Action:      action,
@@ -203,23 +160,43 @@ func (h *Handler) logAction(r *http.Request, action string, sr scoring.Result, r
 	}
 }
 
-// scoreRequest builds RequestVars from the HTTP request and evaluates them.
-func (h *Handler) scoreRequest(r *http.Request, reqBody []byte) scoring.Result {
+// insertAndNotify inserts an audit entry and notifies subscribers.
+func (h *Handler) insertAndNotify(entry *db.AuditEntry) {
+	if err := h.store.InsertAuditEntry(entry); err != nil {
+		log.Printf("audit log error: %v", err)
+	} else if h.notifier != nil {
+		h.notifier.Publish(entry)
+	}
+}
+
+// scoreRequest builds RequestVars from the HTTP request and captured body.
+func (h *Handler) scoreRequest(r *http.Request, cap *CapturedBody) scoring.Result {
 	headers := make(map[string]string)
 	for k, v := range r.Header {
 		if len(v) > 0 {
 			headers[k] = v[0]
 		}
 	}
+
+	var bodyStr string
+	if !cap.IsBinary {
+		bodyStr = string(cap.Logged)
+	}
+	bodySize := int(cap.FullSize)
+	if bodySize < 0 {
+		bodySize = len(cap.Logged)
+	}
+
 	return h.scorer.Load().Eval(scoring.RequestVars{
-		Method:   r.Method,
-		URL:      r.URL.String(),
-		Host:     r.URL.Hostname(),
-		Path:     r.URL.Path,
-		Body:     string(reqBody),
-		BodySize: len(reqBody),
-		Reason:   r.Header.Get("X-Reason"),
-		Headers:  headers,
+		Method:       r.Method,
+		URL:          r.URL.String(),
+		Host:         r.URL.Hostname(),
+		Path:         r.URL.Path,
+		Body:         bodyStr,
+		BodySize:     bodySize,
+		BodyIsBinary: cap.IsBinary,
+		Reason:       r.Header.Get("X-Reason"),
+		Headers:      headers,
 	})
 }
 
@@ -229,27 +206,28 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch decision.Tier {
 	case policy.TierDeny:
-		h.logAction(r, "DENY", zeroResult)
+		h.logAction(r, "DENY", zeroResult, nil, 0)
 		http.Error(w, "domain denied by policy", http.StatusForbidden)
 		return
 	case policy.TierAllow:
 		// Skip X-Reason check.
 	default:
 		if err := requireReason(r); err != nil {
-			h.logAction(r, "REJECT", zeroResult)
+			h.logAction(r, "REJECT", zeroResult, nil, 0)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 
-	reqBody, err := io.ReadAll(r.Body)
+	// Capture request body with limits.
+	cap, err := CaptureRequestBody(r.Body, r.Header.Get("Content-Type"), r.ContentLength, h.limits)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadGateway)
 		return
 	}
 	r.Body.Close()
 
-	sr := h.scoreRequest(r, reqBody)
+	sr := h.scoreRequest(r, cap)
 
 	if decision.Tier == policy.TierDefault {
 		if sr.Score >= 20 {
@@ -266,30 +244,58 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := h.policy.Reload(); err != nil {
 				log.Printf("policy reload after ban: %v", err)
 			}
-			h.logAction(r, "BAN", sr, reqBody)
+			h.logAction(r, "BAN", sr, cap.Logged, cap.FullSize)
 			http.Error(w, "request banned by scoring engine", http.StatusForbidden)
 			return
 		}
 		if sr.Score >= 10 {
-			h.logAction(r, "BLOCK", sr, reqBody)
+			h.logAction(r, "BLOCK", sr, cap.Logged, cap.FullSize)
 			http.Error(w, "request blocked by scoring engine", http.StatusForbidden)
 			return
 		}
 	}
 
-	fwd, err := h.forwardRequest(r, reqBody, sr, "ALLOW")
+	// Forward request upstream.
+	resp, err := h.doUpstream(r, cap.FullReader, r.ContentLength)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	defer resp.Body.Close()
 
-	for key, vals := range fwd.header {
+	// Write response headers.
+	for key, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(key, v)
 		}
 	}
-	w.WriteHeader(fwd.statusCode)
-	w.Write(fwd.body)
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream response body to client while capturing log portion.
+	respLogged, respFullSize, err := CaptureResponseBody(resp.Body, resp.Header.Get("Content-Type"), h.limits, w)
+	if err != nil {
+		log.Printf("response streaming error: %v", err)
+	}
+
+	// Create audit entry.
+	reqHeaders, _ := json.Marshal(r.Header)
+	entry := &db.AuditEntry{
+		Timestamp:    time.Now(),
+		Method:       r.Method,
+		URL:          r.URL.String(),
+		Host:         r.URL.Hostname(),
+		Reason:       r.Header.Get("X-Reason"),
+		ReqHeaders:   string(reqHeaders),
+		ReqBody:      cap.Logged,
+		ReqBodySize:  cap.FullSize,
+		RespStatus:   resp.StatusCode,
+		RespBody:     respLogged,
+		RespBodySize: respFullSize,
+		RiskScore:    sr.Score,
+		RiskSignals:  sr.SignalsJSON(),
+		Action:       "ALLOW",
+	}
+	h.insertAndNotify(entry)
 }
 
 func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +320,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			Header: r.Header,
 		}
 		synth.URL.Host = hostname
-		h.logAction(synth, "DENY", zeroResult)
+		h.logAction(synth, "DENY", zeroResult, nil, 0)
 		http.Error(w, "domain denied by policy", http.StatusForbidden)
 		return
 	}
@@ -370,7 +376,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 		// If host was banned mid-tunnel, deny subsequent requests.
 		if decision.Tier == policy.TierDeny {
-			h.logAction(req, "DENY", zeroResult)
+			h.logAction(req, "DENY", zeroResult, nil, 0)
 			writeErrorResponse(tlsConn, http.StatusForbidden, "domain denied by policy")
 			continue
 		}
@@ -378,20 +384,21 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		// Apply tier-based X-Reason enforcement (decision evaluated once at CONNECT time).
 		if decision.Tier == policy.TierDefault {
 			if err := requireReason(req); err != nil {
-				h.logAction(req, "REJECT", zeroResult)
+				h.logAction(req, "REJECT", zeroResult, nil, 0)
 				writeErrorResponse(tlsConn, http.StatusBadRequest, err.Error())
 				continue
 			}
 		}
 
-		reqBody, err := io.ReadAll(req.Body)
+		// Capture request body with limits.
+		cap, err := CaptureRequestBody(req.Body, req.Header.Get("Content-Type"), req.ContentLength, h.limits)
 		if err != nil {
 			writeErrorResponse(tlsConn, http.StatusBadGateway, "failed to read request body")
 			continue
 		}
 		req.Body.Close()
 
-		sr := h.scoreRequest(req, reqBody)
+		sr := h.scoreRequest(req, cap)
 
 		if decision.Tier == policy.TierDefault {
 			if sr.Score >= 20 {
@@ -408,25 +415,54 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 				if err := h.policy.Reload(); err != nil {
 					log.Printf("policy reload after ban: %v", err)
 				}
-				h.logAction(req, "BAN", sr, reqBody)
+				h.logAction(req, "BAN", sr, cap.Logged, cap.FullSize)
 				writeErrorResponse(tlsConn, http.StatusForbidden, "request banned by scoring engine")
 				decision.Tier = policy.TierDeny
 				continue
 			}
 			if sr.Score >= 10 {
-				h.logAction(req, "BLOCK", sr, reqBody)
+				h.logAction(req, "BLOCK", sr, cap.Logged, cap.FullSize)
 				writeErrorResponse(tlsConn, http.StatusForbidden, "request blocked by scoring engine")
 				continue
 			}
 		}
 
-		fwd, err := h.forwardRequest(req, reqBody, sr, "ALLOW")
+		// Forward request upstream.
+		resp, err := h.doUpstream(req, cap.FullReader, req.ContentLength)
 		if err != nil {
 			writeErrorResponse(tlsConn, http.StatusBadGateway, err.Error())
 			continue
 		}
 
-		writeResponse(tlsConn, fwd)
+		// Stream response to client while capturing log portion.
+		limit := ResponseCaptureLimit(resp.Header.Get("Content-Type"), h.limits)
+		cr := newResponseCapture(resp.Body, limit)
+		resp.Body = cr
+		resp.Write(tlsConn)
+		cr.Close()
+
+		respLogged := cr.Logged()
+		respFullSize := cr.FullSize()
+
+		// Create audit entry.
+		reqHeaders, _ := json.Marshal(req.Header)
+		entry := &db.AuditEntry{
+			Timestamp:    time.Now(),
+			Method:       req.Method,
+			URL:          req.URL.String(),
+			Host:         req.URL.Hostname(),
+			Reason:       req.Header.Get("X-Reason"),
+			ReqHeaders:   string(reqHeaders),
+			ReqBody:      cap.Logged,
+			ReqBodySize:  cap.FullSize,
+			RespStatus:   resp.StatusCode,
+			RespBody:     respLogged,
+			RespBodySize: respFullSize,
+			RiskScore:    sr.Score,
+			RiskSignals:  sr.SignalsJSON(),
+			Action:       "ALLOW",
+		}
+		h.insertAndNotify(entry)
 	}
 }
 
@@ -440,19 +476,6 @@ func writeErrorResponse(conn net.Conn, code int, msg string) {
 		Body:       io.NopCloser(bytes.NewBufferString(msg + "\n")),
 	}
 	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	resp.Write(conn)
-}
-
-// writeResponse writes a forwarded response as an HTTP response to a raw connection.
-func writeResponse(conn net.Conn, fwd *forwardedResponse) {
-	resp := &http.Response{
-		StatusCode: fwd.statusCode,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     fwd.header,
-		Body:       io.NopCloser(bytes.NewReader(fwd.body)),
-	}
-	resp.ContentLength = int64(len(fwd.body))
 	resp.Write(conn)
 }
 
