@@ -2,3 +2,4 @@ audit.db
 ca.key
 ca.pem
 /mindgame
+coverage.out
