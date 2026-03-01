@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
@@ -53,10 +54,33 @@ func setupTestServer(t *testing.T) *Server {
 	return NewServer(store, pol, reloadScorer, reloadRespScorer, broker)
 }
 
+// addAuthCookie adds a valid session cookie to the request using the server's auth instance.
+func addAuthCookie(srv *Server, req *http.Request) {
+	rec := httptest.NewRecorder()
+	srv.auth.setSessionCookie(rec)
+	for _, c := range rec.Result().Cookies() {
+		req.AddCookie(c)
+	}
+}
+
+// authedClient returns an http.Client with a valid session cookie jar for the given test server URL.
+func authedClient(srv *Server, tsURL string) *http.Client {
+	jar, _ := cookiejar.New(nil)
+	rec := httptest.NewRecorder()
+	srv.auth.setSessionCookie(rec)
+	u, _ := url.Parse(tsURL)
+	jar.SetCookies(u, rec.Result().Cookies())
+	return &http.Client{
+		Jar:       jar,
+		Transport: &http.Transport{DisableCompression: true},
+	}
+}
+
 func TestFeedPage(t *testing.T) {
 	srv := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/", nil)
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -76,6 +100,7 @@ func TestDomainsPage(t *testing.T) {
 	srv := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/domains", nil)
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -94,6 +119,7 @@ func TestDomainCRUD(t *testing.T) {
 	form := url.Values{"host": {"test.com"}, "tier": {"allow"}, "note": {"test"}}
 	req := httptest.NewRequest("POST", "/domains", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -105,6 +131,7 @@ func TestDomainCRUD(t *testing.T) {
 
 	// Delete.
 	req = httptest.NewRequest("DELETE", "/domains/test.com", nil)
+	addAuthCookie(srv, req)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -119,6 +146,7 @@ func TestScoringPage(t *testing.T) {
 	srv := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/scoring", nil)
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -137,6 +165,7 @@ func TestScoringCRUD(t *testing.T) {
 	form := url.Values{"name": {"test_rule"}, "expr": {"true"}, "points": {"5"}, "note": {"test"}}
 	req := httptest.NewRequest("POST", "/scoring", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -148,6 +177,7 @@ func TestScoringCRUD(t *testing.T) {
 
 	// Delete.
 	req = httptest.NewRequest("DELETE", "/scoring/test_rule", nil)
+	addAuthCookie(srv, req)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -173,6 +203,7 @@ func TestScoringTest(t *testing.T) {
 	}
 	req := httptest.NewRequest("POST", "/scoring/test", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -192,6 +223,7 @@ func TestStatsPage(t *testing.T) {
 	srv := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/stats", nil)
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -215,6 +247,7 @@ func TestStatsData(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET", "/stats/data", nil)
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -261,12 +294,7 @@ func TestFeedSSE(t *testing.T) {
 		})
 	}()
 
-	// Use a transport that doesn't buffer the whole response.
-	client := &http.Client{
-		Transport: &http.Transport{
-			DisableCompression: true,
-		},
-	}
+	client := authedClient(srv, ts.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -296,6 +324,7 @@ func TestDreamPage(t *testing.T) {
 	srv := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/dream", nil)
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -328,9 +357,7 @@ func TestDreamSSE(t *testing.T) {
 		})
 	}()
 
-	client := &http.Client{
-		Transport: &http.Transport{DisableCompression: true},
-	}
+	client := authedClient(srv, ts.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -377,6 +404,7 @@ func TestRespScoringCRUD(t *testing.T) {
 	form := url.Values{"name": {"resp_rule"}, "expr": {"true"}, "points": {"5"}, "note": {"test resp"}}
 	req := httptest.NewRequest("POST", "/scoring/response", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -388,6 +416,7 @@ func TestRespScoringCRUD(t *testing.T) {
 
 	// Delete.
 	req = httptest.NewRequest("DELETE", "/scoring/response/resp_rule", nil)
+	addAuthCookie(srv, req)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -410,6 +439,7 @@ func TestRespScoringCreateInvalid(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest("POST", "/scoring/response", strings.NewReader(tt.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			addAuthCookie(srv, req)
 			rec := httptest.NewRecorder()
 			srv.ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest {
@@ -432,6 +462,7 @@ func TestRespScoringUpdate(t *testing.T) {
 	form := url.Values{"expr": {"false"}, "points": {"10"}, "enabled": {"false"}, "note": {"updated"}}
 	req := httptest.NewRequest("PUT", "/scoring/response/resp_r1", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -445,6 +476,7 @@ func TestRespScoringUpdateInvalidPoints(t *testing.T) {
 	form := url.Values{"expr": {"true"}, "points": {"abc"}, "note": {""}}
 	req := httptest.NewRequest("PUT", "/scoring/response/whatever", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -470,6 +502,7 @@ func TestRespScoringTest(t *testing.T) {
 	}
 	req := httptest.NewRequest("POST", "/scoring/response/test", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -498,6 +531,7 @@ func TestDomainUpdate(t *testing.T) {
 	form := url.Values{"tier": {"deny"}, "banned": {"true"}, "note": {"banned now"}}
 	req := httptest.NewRequest("PUT", "/domains/update.com", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -519,6 +553,7 @@ func TestScoringUpdate(t *testing.T) {
 	form := url.Values{"expr": {"false"}, "points": {"20"}, "enabled": {"false"}, "note": {"changed"}}
 	req := httptest.NewRequest("PUT", "/scoring/upd_rule", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -541,6 +576,7 @@ func TestFeedDetail(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET", "/feed/detail/1", nil)
+	addAuthCookie(srv, req)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 

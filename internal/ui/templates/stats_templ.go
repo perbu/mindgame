@@ -167,7 +167,7 @@ func StatsContent(stats *db.AuditStats) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</div><div class=\"label\">Rejected</div></div></div><div style=\"display:grid;grid-template-columns:1fr 1fr;gap:1rem\"><div class=\"card\"><h2>Top Hosts</h2>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</div><div class=\"label\">Rejected</div></div></div><div class=\"detail-grid\"><div class=\"card\"><h2>Top Hosts</h2>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

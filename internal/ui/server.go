@@ -16,6 +16,7 @@ type Server struct {
 	store            *db.Store
 	policy           *policy.Cache
 	broker           *Broker
+	auth             *Auth
 	reloadScorer     func() error
 	reloadRespScorer func() error
 	mux              *http.ServeMux
@@ -32,41 +33,52 @@ func NewServer(store *db.Store, pol *policy.Cache, reloadScorer func() error, re
 		mux:              http.NewServeMux(),
 	}
 
-	// Feed
-	s.mux.HandleFunc("GET /{$}", s.handleFeed)
-	s.mux.HandleFunc("GET /feed/events", s.handleFeedSSE)
-	s.mux.HandleFunc("GET /feed/detail/{id}", s.handleFeedDetail)
+	s.auth = NewAuth()
+	auth := s.auth
 
-	// Domains
-	s.mux.HandleFunc("GET /domains", s.handleDomains)
-	s.mux.HandleFunc("POST /domains", s.handleDomainCreate)
-	s.mux.HandleFunc("PUT /domains/{host}", s.handleDomainUpdate)
-	s.mux.HandleFunc("DELETE /domains/{host}", s.handleDomainDelete)
-
-	// Scoring (request rules)
-	s.mux.HandleFunc("GET /scoring", s.handleScoring)
-	s.mux.HandleFunc("POST /scoring", s.handleScoringCreate)
-	s.mux.HandleFunc("POST /scoring/test", s.handleScoringTest)
-	s.mux.HandleFunc("PUT /scoring/{name}", s.handleScoringUpdate)
-	s.mux.HandleFunc("DELETE /scoring/{name}", s.handleScoringDelete)
-
-	// Scoring (response rules)
-	s.mux.HandleFunc("POST /scoring/response", s.handleRespScoringCreate)
-	s.mux.HandleFunc("POST /scoring/response/test", s.handleRespScoringTest)
-	s.mux.HandleFunc("PUT /scoring/response/{name}", s.handleRespScoringUpdate)
-	s.mux.HandleFunc("DELETE /scoring/response/{name}", s.handleRespScoringDelete)
-
-	// Stats
-	s.mux.HandleFunc("GET /stats", s.handleStats)
-	s.mux.HandleFunc("GET /stats/data", s.handleStatsData)
-
-	// Dream mode
-	s.mux.HandleFunc("GET /dream", s.handleDream)
-	s.mux.HandleFunc("GET /dream/events", s.handleDreamEvents)
-
-	// Static assets
+	// Public routes (no auth required).
+	s.mux.HandleFunc("GET /auth", auth.HandleAuth)
+	s.mux.HandleFunc("POST /auth/challenge", auth.HandleChallenge)
+	s.mux.HandleFunc("POST /auth/verify", auth.HandleVerify)
 	staticSub, _ := fs.Sub(staticFS, "static")
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+
+	// Protected routes — wrapped with auth middleware.
+	protected := http.NewServeMux()
+
+	// Feed
+	protected.HandleFunc("GET /{$}", s.handleFeed)
+	protected.HandleFunc("GET /feed/events", s.handleFeedSSE)
+	protected.HandleFunc("GET /feed/detail/{id}", s.handleFeedDetail)
+
+	// Domains
+	protected.HandleFunc("GET /domains", s.handleDomains)
+	protected.HandleFunc("POST /domains", s.handleDomainCreate)
+	protected.HandleFunc("PUT /domains/{host}", s.handleDomainUpdate)
+	protected.HandleFunc("DELETE /domains/{host}", s.handleDomainDelete)
+
+	// Scoring (request rules)
+	protected.HandleFunc("GET /scoring", s.handleScoring)
+	protected.HandleFunc("POST /scoring", s.handleScoringCreate)
+	protected.HandleFunc("POST /scoring/test", s.handleScoringTest)
+	protected.HandleFunc("PUT /scoring/{name}", s.handleScoringUpdate)
+	protected.HandleFunc("DELETE /scoring/{name}", s.handleScoringDelete)
+
+	// Scoring (response rules)
+	protected.HandleFunc("POST /scoring/response", s.handleRespScoringCreate)
+	protected.HandleFunc("POST /scoring/response/test", s.handleRespScoringTest)
+	protected.HandleFunc("PUT /scoring/response/{name}", s.handleRespScoringUpdate)
+	protected.HandleFunc("DELETE /scoring/response/{name}", s.handleRespScoringDelete)
+
+	// Stats
+	protected.HandleFunc("GET /stats", s.handleStats)
+	protected.HandleFunc("GET /stats/data", s.handleStatsData)
+
+	// Dream mode
+	protected.HandleFunc("GET /dream", s.handleDream)
+	protected.HandleFunc("GET /dream/events", s.handleDreamEvents)
+
+	s.mux.Handle("/", auth.RequireAuth(protected))
 
 	return s
 }
