@@ -813,20 +813,13 @@ func TestWebSocketUpgrade_AllowTier(t *testing.T) {
 		t.Errorf("echo = %q, want %q", echo, msg)
 	}
 
-	// Verify audit entry.
+	// Allow-listed domains are not logged.
 	entries, err := store.ListAuditEntries(10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 audit entry, got %d", len(entries))
-	}
-	e := entries[0]
-	if e.Action != "WS_UPGRADE" {
-		t.Errorf("action = %q, want WS_UPGRADE", e.Action)
-	}
-	if e.RespStatus != 101 {
-		t.Errorf("resp_status = %d, want 101", e.RespStatus)
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 audit entries for allow-listed domain, got %d", len(entries))
 	}
 }
 
@@ -1228,23 +1221,13 @@ func TestSSE_AllowTier(t *testing.T) {
 		t.Errorf("body missing last SSE event: %s", body)
 	}
 
-	// Verify audit entry.
-	var entries []db.AuditEntry
-	for range 50 {
-		entries, err = store.ListAuditEntries(10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) >= 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Allow-listed domains are not logged.
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 audit entry, got %d", len(entries))
-	}
-	if entries[0].Action != "SSE_STREAM" {
-		t.Errorf("action = %q, want SSE_STREAM", entries[0].Action)
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 audit entries for allow-listed domain, got %d", len(entries))
 	}
 }
 

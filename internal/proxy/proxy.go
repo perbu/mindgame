@@ -369,9 +369,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				http.StatusForbidden)
 			return
 		}
-		// TierAllow — audit then stream directly, skip scoring.
-		h.logActionWithResp(r, "SSE_STREAM", sr, scoring.Result{},
-			cap.Logged, cap.FullSize, resp.StatusCode, nil, 0)
+		// TierAllow — stream directly, skip scoring and logging.
 		for key, vals := range resp.Header {
 			for _, v := range vals {
 				w.Header().Add(key, v)
@@ -402,8 +400,10 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if streamErr != nil {
 			slog.Error("response streaming error", "error", streamErr)
 		}
-		h.logActionWithResp(r, "ALLOW", sr, scoring.Result{}, cap.Logged, cap.FullSize,
-			resp.StatusCode, logged, fullSize)
+		if decision.Tier != policy.TierAllow {
+			h.logActionWithResp(r, "ALLOW", sr, scoring.Result{}, cap.Logged, cap.FullSize,
+				resp.StatusCode, logged, fullSize)
+		}
 		return
 	}
 
@@ -463,27 +463,29 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	w.Write(buf.FullBody)
 
-	// Create audit entry.
-	reqHeaders, _ := json.Marshal(r.Header)
-	entry := &db.AuditEntry{
-		Timestamp:       time.Now(),
-		Method:          r.Method,
-		URL:             r.URL.String(),
-		Host:            r.URL.Hostname(),
-		Reason:          r.Header.Get("X-Reason"),
-		ReqHeaders:      string(reqHeaders),
-		ReqBody:         cap.Logged,
-		ReqBodySize:     cap.FullSize,
-		RespStatus:      resp.StatusCode,
-		RespBody:        buf.Logged,
-		RespBodySize:    buf.FullSize,
-		RiskScore:       sr.Score,
-		RiskSignals:     sr.SignalsJSON(),
-		RespRiskScore:   rsr.Score,
-		RespRiskSignals: rsr.SignalsJSON(),
-		Action:          "ALLOW",
+	// Log audit entry for non-allowlisted domains.
+	if decision.Tier != policy.TierAllow {
+		reqHeaders, _ := json.Marshal(r.Header)
+		entry := &db.AuditEntry{
+			Timestamp:       time.Now(),
+			Method:          r.Method,
+			URL:             r.URL.String(),
+			Host:            r.URL.Hostname(),
+			Reason:          r.Header.Get("X-Reason"),
+			ReqHeaders:      string(reqHeaders),
+			ReqBody:         cap.Logged,
+			ReqBodySize:     cap.FullSize,
+			RespStatus:      resp.StatusCode,
+			RespBody:        buf.Logged,
+			RespBodySize:    buf.FullSize,
+			RiskScore:       sr.Score,
+			RiskSignals:     sr.SignalsJSON(),
+			RespRiskScore:   rsr.Score,
+			RespRiskSignals: rsr.SignalsJSON(),
+			Action:          "ALLOW",
+		}
+		h.insertAndNotify(entry)
 	}
-	h.insertAndNotify(entry)
 }
 
 func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -647,23 +649,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf(sseDenyMsg, req.URL.Hostname(), req.URL.Hostname()))
 				continue
 			}
-			// TierAllow — audit then stream directly.
-			reqHeaders, _ := json.Marshal(req.Header)
-			entry := &db.AuditEntry{
-				Timestamp:   time.Now(),
-				Method:      req.Method,
-				URL:         req.URL.String(),
-				Host:        req.URL.Hostname(),
-				Reason:      req.Header.Get("X-Reason"),
-				ReqHeaders:  string(reqHeaders),
-				ReqBody:     cap.Logged,
-				ReqBodySize: cap.FullSize,
-				RespStatus:  resp.StatusCode,
-				RiskScore:   sr.Score,
-				RiskSignals: sr.SignalsJSON(),
-				Action:      "SSE_STREAM",
-			}
-			h.insertAndNotify(entry)
+			// TierAllow — stream directly, skip logging.
 			resp.Write(tlsConn)
 			continue
 		}
@@ -674,23 +660,25 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		if resp.ContentLength > 0 && resp.ContentLength > maxResponseBuffer {
 			slog.Debug("tunnel response too large to buffer, streaming", "host", hostname, "content_length", resp.ContentLength)
 			resp.Write(tlsConn)
-			reqHeaders, _ := json.Marshal(req.Header)
-			entry := &db.AuditEntry{
-				Timestamp:       time.Now(),
-				Method:          req.Method,
-				URL:             req.URL.String(),
-				Host:            req.URL.Hostname(),
-				Reason:          req.Header.Get("X-Reason"),
-				ReqHeaders:      string(reqHeaders),
-				ReqBody:         cap.Logged,
-				ReqBodySize:     cap.FullSize,
-				RespStatus:      resp.StatusCode,
-				RespBodySize:    resp.ContentLength,
-				RiskScore:       sr.Score,
-				RiskSignals:     sr.SignalsJSON(),
-				Action:          "ALLOW",
+			if decision.Tier != policy.TierAllow {
+				reqHeaders, _ := json.Marshal(req.Header)
+				entry := &db.AuditEntry{
+					Timestamp:       time.Now(),
+					Method:          req.Method,
+					URL:             req.URL.String(),
+					Host:            req.URL.Hostname(),
+					Reason:          req.Header.Get("X-Reason"),
+					ReqHeaders:      string(reqHeaders),
+					ReqBody:         cap.Logged,
+					ReqBodySize:     cap.FullSize,
+					RespStatus:      resp.StatusCode,
+					RespBodySize:    resp.ContentLength,
+					RiskScore:       sr.Score,
+					RiskSignals:     sr.SignalsJSON(),
+					Action:          "ALLOW",
+				}
+				h.insertAndNotify(entry)
 			}
-			h.insertAndNotify(entry)
 			continue
 		}
 
@@ -743,31 +731,34 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Insert audit entry before writing the response to the hijacked
-		// connection.  Unlike a buffered ResponseWriter, writes to the raw
-		// TLS conn are visible to the client immediately, so the entry must
-		// be persisted first to avoid a race with callers that check the
-		// audit log right after reading the response.
-		reqHeaders, _ := json.Marshal(req.Header)
-		entry := &db.AuditEntry{
-			Timestamp:       time.Now(),
-			Method:          req.Method,
-			URL:             req.URL.String(),
-			Host:            req.URL.Hostname(),
-			Reason:          req.Header.Get("X-Reason"),
-			ReqHeaders:      string(reqHeaders),
-			ReqBody:         cap.Logged,
-			ReqBodySize:     cap.FullSize,
-			RespStatus:      resp.StatusCode,
-			RespBody:        buf.Logged,
-			RespBodySize:    buf.FullSize,
-			RiskScore:       sr.Score,
-			RiskSignals:     sr.SignalsJSON(),
-			RespRiskScore:   rsr.Score,
-			RespRiskSignals: rsr.SignalsJSON(),
-			Action:          "ALLOW",
+		// Log audit entry for non-allowlisted domains.
+		if decision.Tier != policy.TierAllow {
+			// Insert audit entry before writing the response to the hijacked
+			// connection.  Unlike a buffered ResponseWriter, writes to the raw
+			// TLS conn are visible to the client immediately, so the entry must
+			// be persisted first to avoid a race with callers that check the
+			// audit log right after reading the response.
+			reqHeaders, _ := json.Marshal(req.Header)
+			entry := &db.AuditEntry{
+				Timestamp:       time.Now(),
+				Method:          req.Method,
+				URL:             req.URL.String(),
+				Host:            req.URL.Hostname(),
+				Reason:          req.Header.Get("X-Reason"),
+				ReqHeaders:      string(reqHeaders),
+				ReqBody:         cap.Logged,
+				ReqBodySize:     cap.FullSize,
+				RespStatus:      resp.StatusCode,
+				RespBody:        buf.Logged,
+				RespBodySize:    buf.FullSize,
+				RiskScore:       sr.Score,
+				RiskSignals:     sr.SignalsJSON(),
+				RespRiskScore:   rsr.Score,
+				RespRiskSignals: rsr.SignalsJSON(),
+				Action:          "ALLOW",
+			}
+			h.insertAndNotify(entry)
 		}
-		h.insertAndNotify(entry)
 
 		// Write buffered response to client.
 		resp.Body = io.NopCloser(bytes.NewReader(buf.FullBody))
@@ -817,19 +808,7 @@ func (h *Handler) handleWebSocketUpgrade(req *http.Request, tlsConn *tls.Conn, r
 		return
 	}
 
-	// Log the upgrade before writing the 101 to the client.
-	reqHeaders, _ := json.Marshal(req.Header)
-	entry := &db.AuditEntry{
-		Timestamp:  time.Now(),
-		Method:     req.Method,
-		URL:        req.URL.String(),
-		Host:       req.URL.Hostname(),
-		Reason:     req.Header.Get("X-Reason"),
-		ReqHeaders: string(reqHeaders),
-		RespStatus: resp.StatusCode,
-		Action:     "WS_UPGRADE",
-	}
-	h.insertAndNotify(entry)
+	// Skip logging for allowlisted domains (this function is only called for TierAllow).
 
 	// Send 101 Switching Protocols to the client.
 	if err := resp.Write(tlsConn); err != nil {

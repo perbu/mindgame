@@ -284,15 +284,13 @@ func TestHandleHTTPAllowDomain(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
+	// Allow-listed domains are not logged.
 	entries, err := store.ListAuditEntries(10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 audit entry, got %d", len(entries))
-	}
-	if entries[0].Action != "ALLOW" {
-		t.Errorf("action = %q, want ALLOW", entries[0].Action)
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 audit entries for allow-listed domain, got %d", len(entries))
 	}
 }
 
@@ -493,7 +491,7 @@ func TestHandleHTTPAllowTierHighScoreForwarded(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	// Allow tier → forwarded even with high score.
+	// Allow tier → forwarded even with high score, but not logged.
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -502,15 +500,8 @@ func TestHandleHTTPAllowTierHighScoreForwarded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
-	}
-	e := entries[0]
-	if e.Action != "ALLOW" {
-		t.Errorf("action = %q, want ALLOW", e.Action)
-	}
-	if e.RiskScore < 20 {
-		t.Errorf("risk_score = %d, want >= 20 (recorded for forensics)", e.RiskScore)
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries for allow-listed domain, got %d", len(entries))
 	}
 }
 
