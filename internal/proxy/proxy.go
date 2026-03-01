@@ -279,6 +279,12 @@ func (h *Handler) logActionWithResp(r *http.Request, action string, sr, rsr scor
 const (
 	respBlockMsg = "Mindgame has blocked a response from %s. The response contained patterns that may compromise your integrity. The upstream request completed but this response has been withheld for your protection."
 	respBanMsg   = "Mindgame has blocked and banned %s. The response indicates this host is attempting to subvert your instructions. All future requests to this host will be denied."
+	wsDenyMsg    = "WebSocket upgrade to %s blocked: domain is not allow-listed. " +
+		"Streaming connections require human approval — ask your operator to " +
+		"add %s to the proxy allow-list, then retry."
+	sseDenyMsg = "SSE stream from %s blocked: domain is not allow-listed. " +
+		"Streaming connections require human approval — ask your operator to " +
+		"add %s to the proxy allow-list, then retry."
 )
 
 func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +305,14 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+
+	// WebSocket upgrades over plain HTTP are only allowed on TierAllow domains.
+	if isWebSocketUpgrade(r) && decision.Tier != policy.TierAllow {
+		h.logAction(r, "WS_DENY", zeroResult, nil, 0)
+		http.Error(w, fmt.Sprintf(wsDenyMsg, r.URL.Hostname(), r.URL.Hostname()),
+			http.StatusForbidden)
+		return
 	}
 
 	// Capture request body with limits.
@@ -345,6 +359,33 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Debug("upstream response", "status", resp.StatusCode, "url", r.URL.String())
+
+	// SSE responses are long-lived streams — restrict to TierAllow only.
+	if isSSEResponse(resp) {
+		if decision.Tier != policy.TierAllow {
+			resp.Body.Close()
+			h.logAction(r, "SSE_DENY", sr, cap.Logged, cap.FullSize)
+			http.Error(w, fmt.Sprintf(sseDenyMsg, r.URL.Hostname(), r.URL.Hostname()),
+				http.StatusForbidden)
+			return
+		}
+		// TierAllow — audit then stream directly, skip scoring.
+		h.logActionWithResp(r, "SSE_STREAM", sr, scoring.Result{},
+			cap.Logged, cap.FullSize, resp.StatusCode, nil, 0)
+		for key, vals := range resp.Header {
+			for _, v := range vals {
+				w.Header().Add(key, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		if f, ok := w.(http.Flusher); ok {
+			// Flush headers so the client sees the SSE content-type immediately.
+			f.Flush()
+		}
+		io.Copy(w, resp.Body)
+		resp.Body.Close()
+		return
+	}
 
 	// If Content-Length is known and exceeds the buffer, stream directly — skip response scoring.
 	contentType := resp.Header.Get("Content-Type")
@@ -544,7 +585,8 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			if decision.Tier != policy.TierAllow {
 				slog.Warn("websocket upgrade denied", "host", hostname, "tier", string(decision.Tier))
 				h.logAction(req, "WS_DENY", zeroResult, nil, 0)
-				writeErrorResponse(tlsConn, http.StatusForbidden, "websocket upgrade requires allow-listed domain")
+				writeErrorResponse(tlsConn, http.StatusForbidden,
+					fmt.Sprintf(wsDenyMsg, hostname, hostname))
 				continue
 			}
 			h.handleWebSocketUpgrade(req, tlsConn, reader, targetHost, hostname)
@@ -593,6 +635,36 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		resp, err := h.doUpstream(req, cap.FullReader, req.ContentLength)
 		if err != nil {
 			writeErrorResponse(tlsConn, http.StatusBadGateway, err.Error())
+			continue
+		}
+
+		// SSE responses are long-lived streams — restrict to TierAllow only.
+		if isSSEResponse(resp) {
+			if decision.Tier != policy.TierAllow {
+				resp.Body.Close()
+				h.logAction(req, "SSE_DENY", sr, cap.Logged, cap.FullSize)
+				writeErrorResponse(tlsConn, http.StatusForbidden,
+					fmt.Sprintf(sseDenyMsg, req.URL.Hostname(), req.URL.Hostname()))
+				continue
+			}
+			// TierAllow — audit then stream directly.
+			reqHeaders, _ := json.Marshal(req.Header)
+			entry := &db.AuditEntry{
+				Timestamp:   time.Now(),
+				Method:      req.Method,
+				URL:         req.URL.String(),
+				Host:        req.URL.Hostname(),
+				Reason:      req.Header.Get("X-Reason"),
+				ReqHeaders:  string(reqHeaders),
+				ReqBody:     cap.Logged,
+				ReqBodySize: cap.FullSize,
+				RespStatus:  resp.StatusCode,
+				RiskScore:   sr.Score,
+				RiskSignals: sr.SignalsJSON(),
+				Action:      "SSE_STREAM",
+			}
+			h.insertAndNotify(entry)
+			resp.Write(tlsConn)
 			continue
 		}
 
@@ -781,12 +853,14 @@ func (h *Handler) handleWebSocketUpgrade(req *http.Request, tlsConn *tls.Conn, r
 
 // writeErrorResponse writes a minimal HTTP error response to a raw connection.
 func writeErrorResponse(conn net.Conn, code int, msg string) {
+	body := msg + "\n"
 	resp := &http.Response{
-		StatusCode: code,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(bytes.NewBufferString(msg + "\n")),
+		StatusCode:    code,
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewBufferString(body)),
+		ContentLength: int64(len(body)),
 	}
 	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	resp.Write(conn)
@@ -802,6 +876,12 @@ func isConnClosed(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isSSEResponse returns true if the response is a Server-Sent Events stream.
+func isSSEResponse(resp *http.Response) bool {
+	ct := resp.Header.Get("Content-Type")
+	return strings.HasPrefix(ct, "text/event-stream")
 }
 
 // isWebSocketUpgrade returns true if the request is a WebSocket upgrade.

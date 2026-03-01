@@ -1126,3 +1126,319 @@ func TestScoringLargePost(t *testing.T) {
 		t.Errorf("risk_signals = %q, want to contain large_outbound", e.RiskSignals)
 	}
 }
+
+// --- SSE integration tests ---
+
+func TestSSE_AllowTier(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	// SSE backend: returns text/event-stream with chunked SSE data.
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+		for i := range 3 {
+			fmt.Fprintf(w, "data: event %d\n\n", i)
+			flusher.Flush()
+		}
+	}))
+	defer backend.Close()
+
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	// Insert allow rule for the backend's hostname.
+	backendURL, _ := url.Parse(backend.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: backendURL.Hostname(), Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make request through the proxy via CONNECT tunnel.
+	proxyURL, _ := url.Parse(proxySrv.URL)
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(authority.CertPEM())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		},
+		Timeout: 10 * time.Second,
+	}
+
+	resp, err := client.Get(backend.URL + "/events")
+	if err != nil {
+		t.Fatalf("GET SSE: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("content-type = %q, want text/event-stream", ct)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "data: event 0") {
+		t.Errorf("body missing SSE events: %s", body)
+	}
+	if !strings.Contains(string(body), "data: event 2") {
+		t.Errorf("body missing last SSE event: %s", body)
+	}
+
+	// Verify audit entry.
+	var entries []db.AuditEntry
+	for range 50 {
+		entries, err = store.ListAuditEntries(10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Action != "SSE_STREAM" {
+		t.Errorf("action = %q, want SSE_STREAM", entries[0].Action)
+	}
+}
+
+func TestSSE_DefaultTier_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	// SSE backend.
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: should not reach\n\n")
+	}))
+	defer backend.Close()
+
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	// No domain rule → TierDefault. SSE should be rejected.
+	backendURL, _ := url.Parse(backend.URL)
+
+	conn := rawCONNECT(t, proxyAddr(t, proxySrv.URL), backendURL.Host)
+	defer conn.Close()
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(authority.CertPEM())
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName: backendURL.Hostname(),
+		RootCAs:    pool,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	// Send HTTP request that will get an SSE response.
+	httpReq := fmt.Sprintf(
+		"GET /events HTTP/1.1\r\nHost: %s\r\nX-Reason: sse test\r\n\r\n",
+		backendURL.Host,
+	)
+	if _, err := tlsConn.Write([]byte(httpReq)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	reader := bufio.NewReader(tlsConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "SSE stream from") {
+		t.Errorf("body should contain SSE deny message, got: %s", body)
+	}
+	if !strings.Contains(string(body), "ask your operator") {
+		t.Errorf("body should contain escalation text, got: %s", body)
+	}
+
+	// Verify audit entry logged as SSE_DENY.
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Action != "SSE_DENY" {
+		t.Errorf("action = %q, want SSE_DENY", entries[0].Action)
+	}
+}
+
+func TestWebSocketDenyMessage(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("should not reach"))
+	}))
+	defer backend.Close()
+
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	// No domain rule → TierDefault.
+	backendURL, _ := url.Parse(backend.URL)
+
+	conn := rawCONNECT(t, proxyAddr(t, proxySrv.URL), backendURL.Host)
+	defer conn.Close()
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(authority.CertPEM())
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName: backendURL.Hostname(),
+		RootCAs:    pool,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	// Send WebSocket upgrade request.
+	upgradeReq := fmt.Sprintf(
+		"GET /ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Reason: ws test\r\n\r\n",
+		backendURL.Host,
+	)
+	if _, err := tlsConn.Write([]byte(upgradeReq)); err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+
+	reader := bufio.NewReader(tlsConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, backendURL.Hostname()) {
+		t.Errorf("deny message should contain hostname %q, got: %s", backendURL.Hostname(), bodyStr)
+	}
+	if !strings.Contains(bodyStr, "ask your operator") {
+		t.Errorf("deny message should contain escalation text, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "WebSocket upgrade") {
+		t.Errorf("deny message should mention WebSocket, got: %s", bodyStr)
+	}
+}
