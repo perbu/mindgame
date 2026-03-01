@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bufio"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -672,6 +673,250 @@ func TestMITMDenyAtConnect(t *testing.T) {
 	}
 	if !strings.Contains(string(buf[:n]), "403") {
 		t.Errorf("expected 403 in CONNECT response, got: %s", buf[:n])
+	}
+}
+
+func TestWebSocketUpgrade_AllowTier(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	// WebSocket echo backend: responds to upgrade with 101, then echoes frames.
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "not a websocket request", http.StatusBadRequest)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack not supported", http.StatusInternalServerError)
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Send 101 Switching Protocols.
+		buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		buf.Flush()
+
+		// Echo loop: read a line, write it back.
+		for {
+			line, err := buf.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			buf.Write(line)
+			buf.Flush()
+		}
+	}))
+	defer backend.Close()
+
+	// Let the proxy's WebSocket dialer trust the test backend's cert.
+	handler.SetWSDialTLS(func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		cfg.InsecureSkipVerify = true
+		return tls.Dial(network, addr, cfg)
+	})
+
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	// Insert allow rule for the backend's hostname.
+	backendURL, _ := url.Parse(backend.URL)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: backendURL.Hostname(), Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Establish CONNECT tunnel through the proxy.
+	conn := rawCONNECT(t, proxyAddr(t, proxySrv.URL), backendURL.Host)
+	defer conn.Close()
+
+	// TLS handshake over the tunnel (trust the proxy CA).
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(authority.CertPEM())
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName: backendURL.Hostname(),
+		RootCAs:    pool,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	// Send WebSocket upgrade request.
+	upgradeReq := fmt.Sprintf(
+		"GET /ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+		backendURL.Host,
+	)
+	if _, err := tlsConn.Write([]byte(upgradeReq)); err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+
+	// Read response — expect 101.
+	reader := bufio.NewReader(tlsConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read upgrade response: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusSwitchingProtocols)
+	}
+
+	// Test bidirectional data: send a line, expect it echoed back.
+	msg := "hello websocket\n"
+	if _, err := tlsConn.Write([]byte(msg)); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	echo, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if echo != msg {
+		t.Errorf("echo = %q, want %q", echo, msg)
+	}
+
+	// Verify audit entry.
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != "WS_UPGRADE" {
+		t.Errorf("action = %q, want WS_UPGRADE", e.Action)
+	}
+	if e.RespStatus != 101 {
+		t.Errorf("resp_status = %d, want 101", e.RespStatus)
+	}
+}
+
+func TestWebSocketUpgrade_DefaultTier_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	authority, err := ca.New(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key"))
+	if err != nil {
+		t.Fatalf("ca.New: %v", err)
+	}
+
+	pol, err := policy.NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatalf("policy.NewCache: %v", err)
+	}
+	t.Cleanup(pol.Stop)
+
+	scorer, err := scoring.New(scoring.DefaultRules())
+	if err != nil {
+		t.Fatalf("scoring.New: %v", err)
+	}
+
+	respScorer, err := scoring.NewResponse(scoring.DefaultResponseRules())
+	if err != nil {
+		t.Fatalf("scoring.NewResponse: %v", err)
+	}
+
+	handler := proxy.New(store, authority, pol, scorer, respScorer, proxy.DefaultBodyLimits())
+	handler.SetTransport(&http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	})
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("should not reach"))
+	}))
+	defer backend.Close()
+
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	// No domain rule → TierDefault. WebSocket upgrade should be rejected.
+	backendURL, _ := url.Parse(backend.URL)
+
+	conn := rawCONNECT(t, proxyAddr(t, proxySrv.URL), backendURL.Host)
+	defer conn.Close()
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(authority.CertPEM())
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName: backendURL.Hostname(),
+		RootCAs:    pool,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	// Send WebSocket upgrade request.
+	upgradeReq := fmt.Sprintf(
+		"GET /ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Reason: ws test\r\n\r\n",
+		backendURL.Host,
+	)
+	if _, err := tlsConn.Write([]byte(upgradeReq)); err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+
+	reader := bufio.NewReader(tlsConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	// Verify audit entry logged as WS_DENY.
+	entries, err := store.ListAuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Action != "WS_DENY" {
+		t.Errorf("action = %q, want WS_DENY", entries[0].Action)
 	}
 }
 

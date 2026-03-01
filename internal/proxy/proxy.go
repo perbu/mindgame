@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -48,6 +49,7 @@ type Handler struct {
 	notifier   AuditNotifier
 	transport  http.RoundTripper
 	limits     BodyLimits
+	wsDialTLS  func(network, addr string, config *tls.Config) (*tls.Conn, error) // for WebSocket upstream; nil → tls.Dial
 }
 
 // New creates a proxy handler backed by the given store, certificate authority,
@@ -88,6 +90,12 @@ func (h *Handler) SetResponseScorer(s *scoring.Engine) {
 // InsecureSkipVerify or custom dialing.
 func (h *Handler) SetTransport(rt http.RoundTripper) {
 	h.transport = rt
+}
+
+// SetWSDialTLS overrides the TLS dial function used for WebSocket upstream
+// connections. Useful for tests that need InsecureSkipVerify.
+func (h *Handler) SetWSDialTLS(fn func(network, addr string, config *tls.Config) (*tls.Conn, error)) {
+	h.wsDialTLS = fn
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -531,6 +539,18 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// WebSocket upgrades are only allowed on TierAllow domains.
+		if isWebSocketUpgrade(req) {
+			if decision.Tier != policy.TierAllow {
+				slog.Warn("websocket upgrade denied", "host", hostname, "tier", string(decision.Tier))
+				h.logAction(req, "WS_DENY", zeroResult, nil, 0)
+				writeErrorResponse(tlsConn, http.StatusForbidden, "websocket upgrade requires allow-listed domain")
+				continue
+			}
+			h.handleWebSocketUpgrade(req, tlsConn, reader, targetHost, hostname)
+			return // connection handed off to splice goroutines
+		}
+
 		// Capture request body with limits.
 		cap, err := CaptureRequestBody(req.Body, req.Header.Get("Content-Type"), req.ContentLength, h.limits)
 		if err != nil {
@@ -684,6 +704,81 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleWebSocketUpgrade forwards a WebSocket upgrade to the upstream server
+// and, on success, splices the two connections bidirectionally.
+// Only called for TierAllow domains.
+func (h *Handler) handleWebSocketUpgrade(req *http.Request, tlsConn *tls.Conn, reader *bufio.Reader, targetHost, hostname string) {
+	slog.Info("websocket upgrade", "host", hostname, "url", req.URL.String())
+
+	dial := h.wsDialTLS
+	if dial == nil {
+		dial = tls.Dial
+	}
+	upstreamConn, err := dial("tcp", targetHost, &tls.Config{
+		ServerName: hostname,
+	})
+	if err != nil {
+		slog.Error("websocket upstream dial failed", "host", targetHost, "error", err)
+		writeErrorResponse(tlsConn, http.StatusBadGateway, fmt.Sprintf("upstream dial: %v", err))
+		return
+	}
+	defer upstreamConn.Close()
+
+	// Write the upgrade request with all headers intact (no hop-by-hop stripping).
+	if err := req.Write(upstreamConn); err != nil {
+		slog.Error("websocket upstream write failed", "host", targetHost, "error", err)
+		writeErrorResponse(tlsConn, http.StatusBadGateway, "failed to write upgrade request")
+		return
+	}
+
+	upstreamReader := bufio.NewReader(upstreamConn)
+	resp, err := http.ReadResponse(upstreamReader, req)
+	if err != nil {
+		slog.Error("websocket upstream response failed", "host", targetHost, "error", err)
+		writeErrorResponse(tlsConn, http.StatusBadGateway, "failed to read upgrade response")
+		return
+	}
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		slog.Warn("websocket upgrade rejected by upstream", "host", targetHost, "status", resp.StatusCode)
+		resp.Write(tlsConn)
+		return
+	}
+
+	// Log the upgrade before writing the 101 to the client.
+	reqHeaders, _ := json.Marshal(req.Header)
+	entry := &db.AuditEntry{
+		Timestamp:  time.Now(),
+		Method:     req.Method,
+		URL:        req.URL.String(),
+		Host:       req.URL.Hostname(),
+		Reason:     req.Header.Get("X-Reason"),
+		ReqHeaders: string(reqHeaders),
+		RespStatus: resp.StatusCode,
+		Action:     "WS_UPGRADE",
+	}
+	h.insertAndNotify(entry)
+
+	// Send 101 Switching Protocols to the client.
+	if err := resp.Write(tlsConn); err != nil {
+		slog.Error("websocket 101 write to client failed", "error", err)
+		return
+	}
+
+	// Splice connections bidirectionally.
+	// Use reader (bufio.Reader) as the client source to drain any buffered bytes.
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(upstreamConn, reader) // client → upstream
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(tlsConn, upstreamReader) // upstream → client
+		done <- struct{}{}
+	}()
+	<-done // one direction closed; return lets defers clean up
+}
+
 // writeErrorResponse writes a minimal HTTP error response to a raw connection.
 func writeErrorResponse(conn net.Conn, code int, msg string) {
 	resp := &http.Response{
@@ -705,6 +800,25 @@ func isConnClosed(err error) bool {
 	var netErr *net.OpError
 	if errors.As(err, &netErr) {
 		return true
+	}
+	return false
+}
+
+// isWebSocketUpgrade returns true if the request is a WebSocket upgrade.
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		headerContains(r.Header, "Connection", "upgrade")
+}
+
+// headerContains reports whether any value for the given header key
+// contains the specified token (case-insensitive, comma-separated).
+func headerContains(h http.Header, key, token string) bool {
+	for _, v := range h[key] {
+		for _, s := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(s), token) {
+				return true
+			}
+		}
 	}
 	return false
 }
