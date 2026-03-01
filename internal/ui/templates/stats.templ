@@ -41,7 +41,7 @@ templ StatsContent(stats *db.AuditStats) {
 			<div class="label">Rejected</div>
 		</div>
 	</div>
-	<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+	<div class="detail-grid">
 		<div class="card">
 			<h2>Top Hosts</h2>
 			if len(stats.TopHosts) == 0 {

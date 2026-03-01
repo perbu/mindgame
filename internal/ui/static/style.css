@@ -319,10 +319,33 @@ tr.expanded { background: rgba(108, 140, 255, 0.08); }
 /* Monospace */
 .mono { font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace; font-size: 0.85rem; }
 
+/* Detail grid (stats page) */
+.detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+/* Table scroll wrapper */
+.card { overflow-x: auto; }
+
 /* Responsive */
 @media (max-width: 768px) {
     .container { padding: 1rem; }
     .form-row { flex-direction: column; }
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     .truncate { max-width: 150px; }
+    nav { gap: 0.75rem; flex-wrap: wrap; }
+    nav .brand { margin-right: 0; }
+}
+
+@media (max-width: 480px) {
+    .stat-grid { grid-template-columns: 1fr; }
+    .detail-grid { grid-template-columns: 1fr; }
+    nav { gap: 0.5rem; padding: 0.5rem 1rem; }
+    nav a { padding: 0.3rem 0.5rem; font-size: 0.8rem; }
+    .truncate { max-width: 100px; }
+    table { font-size: 0.8rem; }
+    td, th { padding: 0.35rem 0.5rem; }
+    .card { padding: 0.75rem; }
 }
