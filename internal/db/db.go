@@ -658,6 +658,30 @@ func ParseSignals(signalsJSON string) []string {
 	return signals
 }
 
+// StatusReasonText returns a human-readable explanation for the given audit action.
+func StatusReasonText(action string) string {
+	switch action {
+	case "REJECT":
+		return "Missing required X-Reason header"
+	case "DENY":
+		return "Domain denied by policy"
+	case "BLOCK":
+		return "Request blocked by scoring engine"
+	case "BAN":
+		return "Request banned by scoring engine"
+	case "WS_DENY":
+		return "WebSocket upgrade blocked — domain not allow-listed"
+	case "SSE_DENY":
+		return "SSE stream blocked — domain not allow-listed"
+	case "RESP_BLOCK":
+		return "Response blocked — risky patterns detected"
+	case "RESP_BAN":
+		return "Response banned — host attempting subversion"
+	default:
+		return ""
+	}
+}
+
 // --- Response Scoring Rules ---
 
 // ListResponseScoringRules returns all response scoring rules ordered by name.

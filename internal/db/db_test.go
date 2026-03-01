@@ -690,6 +690,33 @@ func TestGetAuditStats(t *testing.T) {
 	}
 }
 
+func TestStatusReasonText(t *testing.T) {
+	tests := []struct {
+		action string
+		want   string
+	}{
+		{"REJECT", "Missing required X-Reason header"},
+		{"DENY", "Domain denied by policy"},
+		{"BLOCK", "Request blocked by scoring engine"},
+		{"BAN", "Request banned by scoring engine"},
+		{"WS_DENY", "WebSocket upgrade blocked — domain not allow-listed"},
+		{"SSE_DENY", "SSE stream blocked — domain not allow-listed"},
+		{"RESP_BLOCK", "Response blocked — risky patterns detected"},
+		{"RESP_BAN", "Response banned — host attempting subversion"},
+		{"ALLOW", ""},
+		{"SSE_STREAM", ""},
+		{"UNKNOWN", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			got := StatusReasonText(tt.action)
+			if got != tt.want {
+				t.Errorf("StatusReasonText(%q) = %q, want %q", tt.action, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseSignals(t *testing.T) {
 	tests := []struct {
 		name  string

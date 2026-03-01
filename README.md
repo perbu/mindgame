@@ -81,7 +81,7 @@ Risk scoring uses [CEL](https://github.com/google/cel-spec) expressions stored i
 
 `http://localhost:2180`
 
-- Live Feed — real-time request stream via SSE, filterable by action/host/score
+- Live Feed — real-time request stream via SSE, filterable by action/host/score. Rejected and denied requests show a human-readable status reason explaining why.
 - Domain Rules — manage allow/deny list, review bans
 - Scoring Rules — edit CEL expressions, test rules against sample requests
 - Statistics — request rates, top hosts, rule hit frequency

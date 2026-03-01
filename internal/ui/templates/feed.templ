@@ -109,6 +109,10 @@ templ FeedDetail(e *db.AuditEntry) {
 				<dd class="mono">{ e.URL }</dd>
 				<dt>Reason</dt>
 				<dd>{ e.Reason }</dd>
+				if db.StatusReasonText(e.Action) != "" {
+					<dt>Status Reason</dt>
+					<dd>{ db.StatusReasonText(e.Action) }</dd>
+				}
 				<dt>Request Risk Score</dt>
 				<dd><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></dd>
 				<dt>Request Signals</dt>
