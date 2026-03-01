@@ -29,22 +29,24 @@ type Decision struct {
 
 // Cache holds an in-memory map of domain rules and reloads periodically from the DB.
 type Cache struct {
-	store    *db.Store
-	mu       sync.RWMutex
-	rules    map[string]Tier
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	interval time.Duration
+	store     *db.Store
+	mu        sync.RWMutex
+	rules     map[string]Tier // exact host → tier
+	wildcards map[string]Tier // suffix → tier (e.g. ".slack.com" for "*.slack.com")
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	interval  time.Duration
 }
 
 // NewCache creates a Cache, performs an initial load from the DB, and starts
 // a background goroutine that reloads every interval.
 func NewCache(store *db.Store, interval time.Duration) (*Cache, error) {
 	c := &Cache{
-		store:    store,
-		rules:    make(map[string]Tier),
-		stopCh:   make(chan struct{}),
-		interval: interval,
+		store:     store,
+		rules:     make(map[string]Tier),
+		wildcards: make(map[string]Tier),
+		stopCh:    make(chan struct{}),
+		interval:  interval,
 	}
 	if err := c.Reload(); err != nil {
 		return nil, err
@@ -75,14 +77,22 @@ func (c *Cache) Reload() error {
 	if err != nil {
 		return err
 	}
-	m := make(map[string]Tier, len(rows))
+	exact := make(map[string]Tier, len(rows))
+	wild := make(map[string]Tier)
 	for _, r := range rows {
-		m[strings.ToLower(r.Host)] = Tier(r.Tier)
+		host := strings.ToLower(r.Host)
+		if strings.HasPrefix(host, "*.") {
+			// Store suffix keyed without the "*", e.g. ".slack.com".
+			wild[host[1:]] = Tier(r.Tier)
+		} else {
+			exact[host] = Tier(r.Tier)
+		}
 	}
 	c.mu.Lock()
-	c.rules = m
+	c.rules = exact
+	c.wildcards = wild
 	c.mu.Unlock()
-	slog.Debug("policy cache reloaded", "rules", len(m))
+	slog.Debug("policy cache reloaded", "exact", len(exact), "wildcards", len(wild))
 	return nil
 }
 
@@ -94,9 +104,24 @@ func (c *Cache) Stop() {
 }
 
 // Evaluate returns the policy decision for the given host.
+// Exact rules take priority over wildcard rules.
 func (c *Cache) Evaluate(host string) Decision {
+	h := strings.ToLower(host)
+
 	c.mu.RLock()
-	tier, ok := c.rules[strings.ToLower(host)]
+	tier, ok := c.rules[h]
+	if !ok {
+		// Walk parent suffixes: for "api.slack.com" try ".slack.com", then ".com".
+		for i := 0; i < len(h); i++ {
+			if h[i] == '.' {
+				if t, wok := c.wildcards[h[i:]]; wok {
+					tier = t
+					ok = true
+					break
+				}
+			}
+		}
+	}
 	c.mu.RUnlock()
 
 	if !ok {
@@ -112,6 +137,32 @@ func (c *Cache) Evaluate(host string) Decision {
 	default:
 		return Decision{Tier: TierDefault, RequireReason: true}
 	}
+}
+
+// ValidateHost checks that host is a valid domain or wildcard pattern.
+// Accepted forms: "example.com" or "*.example.com".
+func ValidateHost(host string) error {
+	if host == "" {
+		return fmt.Errorf("host must not be empty")
+	}
+	// Strip optional wildcard prefix for suffix validation.
+	suffix := host
+	if strings.HasPrefix(host, "*.") {
+		suffix = host[2:]
+	}
+	if suffix == "" {
+		return fmt.Errorf("wildcard must have a domain suffix (e.g. *.example.com)")
+	}
+	if strings.Contains(suffix, "*") {
+		return fmt.Errorf("only a leading *. wildcard is allowed")
+	}
+	if strings.HasPrefix(suffix, ".") || strings.HasSuffix(suffix, ".") {
+		return fmt.Errorf("domain must not start or end with a dot")
+	}
+	if strings.Contains(suffix, "..") {
+		return fmt.Errorf("domain must not contain consecutive dots")
+	}
+	return nil
 }
 
 // ParseSeedFile reads a seed file and returns domain rules.
@@ -153,6 +204,9 @@ func ParseSeedFile(path string) ([]db.DomainRule, error) {
 
 		if tier != "allow" && tier != "deny" {
 			return nil, fmt.Errorf("line %d: invalid tier %q (must be 'allow' or 'deny')", lineNum, tier)
+		}
+		if err := ValidateHost(host); err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNum, err)
 		}
 
 		rules = append(rules, db.DomainRule{

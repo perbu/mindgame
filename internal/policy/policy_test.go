@@ -142,6 +142,119 @@ func TestStopDoubleCallNoPanic(t *testing.T) {
 	c.Stop() // second call should not panic
 }
 
+func TestEvaluateWildcard(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.InsertDomainRule(&db.DomainRule{
+		Host: "*.slack.com", Tier: "allow", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	// Subdomain should match.
+	d := c.Evaluate("api.slack.com")
+	if d.Tier != TierAllow {
+		t.Errorf("api.slack.com: tier = %q, want %q", d.Tier, TierAllow)
+	}
+	d = c.Evaluate("hooks.slack.com")
+	if d.Tier != TierAllow {
+		t.Errorf("hooks.slack.com: tier = %q, want %q", d.Tier, TierAllow)
+	}
+
+	// Bare domain should NOT match the wildcard.
+	d = c.Evaluate("slack.com")
+	if d.Tier != TierDefault {
+		t.Errorf("slack.com: tier = %q, want %q", d.Tier, TierDefault)
+	}
+
+	// Unrelated domain should not match.
+	d = c.Evaluate("notslack.com")
+	if d.Tier != TierDefault {
+		t.Errorf("notslack.com: tier = %q, want %q", d.Tier, TierDefault)
+	}
+}
+
+func TestEvaluateExactOverridesWildcard(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Now()
+	if err := store.InsertDomainRules([]db.DomainRule{
+		{Host: "*.example.com", Tier: "allow", CreatedAt: now},
+		{Host: "bad.example.com", Tier: "deny", CreatedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := NewCache(store, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	// Exact deny should win over wildcard allow.
+	d := c.Evaluate("bad.example.com")
+	if d.Tier != TierDeny {
+		t.Errorf("bad.example.com: tier = %q, want %q", d.Tier, TierDeny)
+	}
+
+	// Other subdomains should still match the wildcard.
+	d = c.Evaluate("good.example.com")
+	if d.Tier != TierAllow {
+		t.Errorf("good.example.com: tier = %q, want %q", d.Tier, TierAllow)
+	}
+}
+
+func TestValidateHost(t *testing.T) {
+	valid := []string{
+		"example.com",
+		"api.slack.com",
+		"*.slack.com",
+		"*.sub.example.com",
+	}
+	for _, h := range valid {
+		if err := ValidateHost(h); err != nil {
+			t.Errorf("ValidateHost(%q) = %v, want nil", h, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"*.",          // no suffix
+		"*.*.com",     // double wildcard
+		"foo.*.com",   // mid-string wildcard
+		"..com",       // consecutive dots
+		".example.com", // leading dot
+	}
+	for _, h := range invalid {
+		if err := ValidateHost(h); err == nil {
+			t.Errorf("ValidateHost(%q) = nil, want error", h)
+		}
+	}
+}
+
+func TestParseSeedFileWildcard(t *testing.T) {
+	content := "allow *.slack.com  # Slack APIs\ndeny *.evil.com\n"
+	path := filepath.Join(t.TempDir(), "seed.txt")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := ParseSeedFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
+	}
+	if rules[0].Host != "*.slack.com" || rules[0].Tier != "allow" {
+		t.Errorf("rule 0 = %+v", rules[0])
+	}
+}
+
 func TestParseSeedFile(t *testing.T) {
 	content := `# This is a comment
 allow api.anthropic.com   # Anthropic API
@@ -181,6 +294,7 @@ func TestParseSeedFileErrors(t *testing.T) {
 		{"invalid tier", "block evil.com\n"},
 		{"malformed line", "allow\n"},
 		{"too many fields", "allow a.com b.com\n"},
+		{"invalid wildcard", "allow *.*.com\n"},
 	}
 
 	for _, tt := range tests {

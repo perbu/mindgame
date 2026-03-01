@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/perbu/mindgame/internal/db"
+	"github.com/perbu/mindgame/internal/policy"
 	"github.com/perbu/mindgame/internal/ui/templates"
 )
 
@@ -38,8 +39,12 @@ func (s *Server) handleDomainCreate(w http.ResponseWriter, r *http.Request) {
 	tier := r.FormValue("tier")
 	note := r.FormValue("note")
 
-	if host == "" || (tier != "allow" && tier != "deny") {
-		http.Error(w, "invalid parameters", http.StatusBadRequest)
+	if tier != "allow" && tier != "deny" {
+		http.Error(w, "invalid tier", http.StatusBadRequest)
+		return
+	}
+	if err := policy.ValidateHost(host); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
