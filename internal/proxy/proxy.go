@@ -41,25 +41,29 @@ var hopByHopHeaders = []string{
 
 // Handler is an HTTP forward proxy that logs all requests to the audit store.
 type Handler struct {
-	store      *db.Store
-	ca         *ca.CA
-	policy     *policy.Cache
-	scorer     atomic.Pointer[scoring.Engine]
-	respScorer atomic.Pointer[scoring.Engine]
-	notifier   AuditNotifier
-	transport  http.RoundTripper
-	limits     BodyLimits
-	wsDialTLS  func(network, addr string, config *tls.Config) (*tls.Conn, error) // for WebSocket upstream; nil → tls.Dial
+	store          *db.Store
+	ca             *ca.CA
+	policy         *policy.Cache
+	scorer         atomic.Pointer[scoring.Engine]
+	respScorer     atomic.Pointer[scoring.Engine]
+	notifier       AuditNotifier
+	transport      http.RoundTripper
+	limits         BodyLimits
+	blockThreshold int // risk score at which requests are blocked (default 10)
+	banThreshold   int // risk score at which domains are banned (default 20)
+	wsDialTLS      func(network, addr string, config *tls.Config) (*tls.Conn, error) // for WebSocket upstream; nil → tls.Dial
 }
 
 // New creates a proxy handler backed by the given store, certificate authority,
 // policy cache, scoring engine, response scoring engine, and body capture limits.
 func New(store *db.Store, authority *ca.CA, pol *policy.Cache, scorer *scoring.Engine, respScorer *scoring.Engine, limits BodyLimits) *Handler {
 	h := &Handler{
-		store:  store,
-		ca:     authority,
-		policy: pol,
-		limits: limits,
+		store:          store,
+		ca:             authority,
+		policy:         pol,
+		limits:         limits,
+		blockThreshold: 10,
+		banThreshold:   20,
 		transport: &http.Transport{
 			DialContext:            (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -90,6 +94,13 @@ func (h *Handler) SetResponseScorer(s *scoring.Engine) {
 // InsecureSkipVerify or custom dialing.
 func (h *Handler) SetTransport(rt http.RoundTripper) {
 	h.transport = rt
+}
+
+// SetThresholds overrides the default block (10) and ban (20) risk-score
+// thresholds used by the scoring engine.
+func (h *Handler) SetThresholds(block, ban int) {
+	h.blockThreshold = block
+	h.banThreshold = ban
 }
 
 // SetWSDialTLS overrides the TLS dial function used for WebSocket upstream
@@ -327,7 +338,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("request scored", "host", r.URL.Hostname(), "score", sr.Score, "signals", sr.Signals)
 
 	if decision.Tier == policy.TierDefault {
-		if sr.Score >= 20 {
+		if sr.Score >= h.banThreshold {
 			// Ban: insert deny rule and reload policy.
 			if err := h.store.InsertDomainRule(&db.DomainRule{
 				Host:      r.URL.Hostname(),
@@ -345,7 +356,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "request banned by scoring engine", http.StatusForbidden)
 			return
 		}
-		if sr.Score >= 10 {
+		if sr.Score >= h.blockThreshold {
 			h.logAction(r, "BLOCK", sr, cap.Logged, cap.FullSize)
 			http.Error(w, "request blocked by scoring engine", http.StatusForbidden)
 			return
@@ -426,7 +437,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		"resp_score", rsr.Score, "combined", combined, "resp_signals", rsr.Signals)
 
 	if decision.Tier == policy.TierDefault {
-		if combined >= 20 {
+		if combined >= h.banThreshold {
 			// Response ban: insert deny rule and reload policy.
 			if err := h.store.InsertDomainRule(&db.DomainRule{
 				Host:      r.URL.Hostname(),
@@ -445,7 +456,7 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(respBanMsg, r.URL.Hostname()), http.StatusBadGateway)
 			return
 		}
-		if combined >= 10 {
+		if combined >= h.blockThreshold {
 			h.logActionWithResp(r, "RESP_BLOCK", sr, rsr, cap.Logged, cap.FullSize,
 				resp.StatusCode, buf.Logged, buf.FullSize)
 			http.Error(w, fmt.Sprintf(respBlockMsg, r.URL.Hostname()), http.StatusBadGateway)
@@ -607,7 +618,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("tunnel request scored", "host", hostname, "method", req.Method, "url", req.URL.String(), "score", sr.Score)
 
 		if decision.Tier == policy.TierDefault {
-			if sr.Score >= 20 {
+			if sr.Score >= h.banThreshold {
 				// Ban: insert deny rule and reload policy.
 				if err := h.store.InsertDomainRule(&db.DomainRule{
 					Host:      req.URL.Hostname(),
@@ -626,7 +637,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 				decision.Tier = policy.TierDeny
 				continue
 			}
-			if sr.Score >= 10 {
+			if sr.Score >= h.blockThreshold {
 				h.logAction(req, "BLOCK", sr, cap.Logged, cap.FullSize)
 				writeErrorResponse(tlsConn, http.StatusForbidden, "request blocked by scoring engine")
 				continue
@@ -701,7 +712,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			"resp_score", rsr.Score, "combined", combined)
 
 		if decision.Tier == policy.TierDefault {
-			if combined >= 20 {
+			if combined >= h.banThreshold {
 				// Response ban: insert deny rule and reload policy.
 				if err := h.store.InsertDomainRule(&db.DomainRule{
 					Host:      req.URL.Hostname(),
@@ -722,7 +733,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 				decision.Tier = policy.TierDeny
 				continue
 			}
-			if combined >= 10 {
+			if combined >= h.blockThreshold {
 				h.logActionWithResp(req, "RESP_BLOCK", sr, rsr, cap.Logged, cap.FullSize,
 					resp.StatusCode, buf.Logged, buf.FullSize)
 				writeErrorResponse(tlsConn, http.StatusBadGateway,

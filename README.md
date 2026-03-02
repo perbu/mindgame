@@ -12,7 +12,7 @@ Domains are classified into three tiers:
 - Deny — blocked outright.
 - Default — everything else. Requires `X-Reason`. Scored for risk.
 
-Risk scoring uses CEL expressions. Requests scoring 10+ are blocked. Requests scoring 20+ ban the host until a human reviews it.
+Risk scoring uses CEL expressions. Requests scoring 10+ are blocked. Requests scoring 20+ ban the host until a human reviews it. Both thresholds are configurable via `-block-threshold` and `-ban-threshold`.
 
 ## Quick Start
 

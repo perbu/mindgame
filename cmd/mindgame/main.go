@@ -36,6 +36,8 @@ func main() {
 	maxTextLog := flag.Int("max-text-log", defaults.MaxTextLog, "max bytes to log for text bodies")
 	maxBinaryLog := flag.Int("max-binary-log", defaults.MaxBinaryLog, "max bytes to log for binary bodies")
 	retention := flag.Duration("retention", 0, "auto-delete audit entries older than this duration (0 = disabled)")
+	blockThreshold := flag.Int("block-threshold", 10, "risk score threshold to block a request")
+	banThreshold := flag.Int("ban-threshold", 20, "risk score threshold to ban a domain")
 	flag.Parse()
 
 	var logLevel slog.Level
@@ -151,7 +153,8 @@ func main() {
 	slog.Info("response scoring engine loaded", "rules", respScorer.RuleCount())
 
 	handler := proxy.New(store, authority, pol, scorer, respScorer, limits)
-	slog.Debug("proxy handler created")
+	handler.SetThresholds(*blockThreshold, *banThreshold)
+	slog.Debug("proxy handler created", "block-threshold", *blockThreshold, "ban-threshold", *banThreshold)
 
 	// SSE broker connects proxy audit writes to the UI live feed.
 	broker := ui.NewBroker()
