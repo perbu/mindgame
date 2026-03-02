@@ -102,6 +102,55 @@ FROM audit_log GROUP BY host ORDER BY avg_score DESC;
 SELECT * FROM audit_log WHERE reason LIKE '%task-id-1234%';
 ```
 
+## Recommendations
+
+### Certificates
+
+Pre-generate your CA certificate and key and store them outside the container. If the proxy regenerates its CA on each restart, you'll need to redistribute the certificate to every agent. Mount the cert directory into the container instead:
+
+```bash
+# Generate certs once
+./mindgame -addr :0 &  # starts and creates ca.pem + ca.key, then stop it
+# Or run the container once and copy the certs out
+
+docker run -p 2080:2080 -p 2180:2180 \
+  -v /path/to/certs:/certs \
+  -v mindgame-data:/data \
+  ghcr.io/perbu/mindgame -ca-cert /certs/ca.pem -ca-key /certs/ca.key
+```
+
+### Agent image
+
+If your agent is something like [OpenClaw](https://github.com/openclaw), consider building the CA certificate and proxy configuration directly into the agent's Docker image. This avoids runtime setup and ensures the agent always trusts the proxy.
+
+### WebSocket and SSE
+
+WebSocket and Server-Sent Events (SSE) connections will **not** function through the proxy. This is by design — Mindgame is a request/response audit proxy. Any services your agent depends on that use WebSocket or SSE should be added to the allow list, which bypasses the proxy's interception.
+
+### Allow-listing
+
+At a minimum, allow-list:
+
+- **LLM provider** — `api.anthropic.com`, `api.openai.com`, etc. These generate high-volume, low-risk traffic that will fill your audit log with noise.
+- **Communication platforms** — Slack, Discord, WhatsApp, or whatever your agent uses to interact with users. These often rely on WebSocket/SSE.
+
+### Injecting headers with external tools
+
+Agents that shell out to tools like `gh` (GitHub CLI) won't automatically include the `X-Reason` header. Most CLI tools have options for injecting extra HTTP headers — for example, `gh` supports `--header`. Rather than relying on the agent to remember this, build wrapper scripts around these tools:
+
+```bash
+#!/bin/bash
+# gh-wrapper: wraps gh with the required X-Reason header
+if [ -z "$GH_REASON" ]; then
+  echo "Error: GH_REASON is not set. Set it to a short description of why this request is being made." >&2
+  echo "The Mindgame proxy requires an X-Reason header on all requests to non-allow-listed hosts." >&2
+  exit 1
+fi
+exec gh "$@" --header "X-Reason: $GH_REASON"
+```
+
+This way the agent calls the wrapper instead of the tool directly, and the header is always included.
+
 ## License
 
 MIT
