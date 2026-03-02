@@ -40,6 +40,11 @@ type AuditEntry struct {
 	Action          string
 }
 
+// TotalScore returns the combined request and response risk score.
+func (e AuditEntry) TotalScore() int {
+	return e.RiskScore + e.RespRiskScore
+}
+
 // Store wraps a SQLite database connection.
 type Store struct {
 	db *sql.DB
@@ -472,7 +477,7 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 		args = append(args, "%"+f.Host+"%")
 	}
 	if f.MinScore > 0 {
-		clauses = append(clauses, "risk_score >= ?")
+		clauses = append(clauses, "(risk_score + resp_risk_score) >= ?")
 		args = append(args, f.MinScore)
 	}
 	if !f.After.IsZero() {
@@ -594,7 +599,7 @@ func (s *Store) GetAuditStats(window time.Duration) (*AuditStats, error) {
 	rows.Close()
 
 	// Top risk hosts by average score.
-	rows, err = s.db.Query(`SELECT host, AVG(risk_score) as avg_score, COUNT(*) as cnt FROM audit_log WHERE timestamp > ? AND risk_score > 0 GROUP BY host ORDER BY avg_score DESC LIMIT 10`, cutoff)
+	rows, err = s.db.Query(`SELECT host, AVG(risk_score + resp_risk_score) as avg_score, COUNT(*) as cnt FROM audit_log WHERE timestamp > ? AND (risk_score + resp_risk_score) > 0 GROUP BY host ORDER BY avg_score DESC LIMIT 10`, cutoff)
 	if err != nil {
 		return nil, err
 	}

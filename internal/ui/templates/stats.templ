@@ -131,7 +131,7 @@ templ StatsContent(stats *db.AuditStats) {
 							<tr>
 								<td class="mono">{ e.Timestamp.Format("15:04:05") }</td>
 								<td class="mono">{ e.Host }</td>
-								<td><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></td>
+								<td><span class={ scoreClass(e.TotalScore()) }>{ fmt.Sprintf("%d", e.TotalScore()) }</span></td>
 							</tr>
 						}
 					</tbody>

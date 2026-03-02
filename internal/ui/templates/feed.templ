@@ -95,7 +95,7 @@ templ FeedRow(e db.AuditEntry) {
 		<td>{ e.Method }</td>
 		<td>{ e.Host }</td>
 		<td class="truncate" title={ e.URL }>{ e.URL }</td>
-		<td><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></td>
+		<td><span class={ scoreClass(e.TotalScore()) }>{ fmt.Sprintf("%d", e.TotalScore()) }</span></td>
 		<td class="truncate" title={ e.Reason }>{ e.Reason }</td>
 	</tr>
 	<tr id={ fmt.Sprintf("detail-%d", e.ID) } class="detail-row"></tr>
@@ -112,6 +112,10 @@ templ FeedDetail(e *db.AuditEntry) {
 				if db.StatusReasonText(e.Action) != "" {
 					<dt>Status Reason</dt>
 					<dd>{ db.StatusReasonText(e.Action) }</dd>
+				}
+				if e.RespRiskScore > 0 {
+					<dt>Total Risk Score</dt>
+					<dd><span class={ scoreClass(e.TotalScore()) }>{ fmt.Sprintf("%d", e.TotalScore()) }</span></dd>
 				}
 				<dt>Request Risk Score</dt>
 				<dd><span class={ scoreClass(e.RiskScore) }>{ fmt.Sprintf("%d", e.RiskScore) }</span></dd>
