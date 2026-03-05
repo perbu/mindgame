@@ -577,14 +577,16 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		req.URL.Host = targetHost
 		req.RequestURI = ""
 
-		// If host was banned mid-tunnel, deny subsequent requests.
+		// Re-evaluate policy on each request so mid-tunnel rule changes
+		// (e.g. adding an allow rule) take effect without reconnecting.
+		decision = h.policy.Evaluate(hostname)
+
 		if decision.Tier == policy.TierDeny {
 			h.logAction(req, "DENY", zeroResult, nil, 0)
 			writeErrorResponse(tlsConn, http.StatusForbidden, "domain denied by policy")
 			continue
 		}
 
-		// Apply tier-based X-Reason enforcement (decision evaluated once at CONNECT time).
 		if decision.Tier == policy.TierDefault {
 			if err := requireReason(req); err != nil {
 				h.logAction(req, "REJECT", zeroResult, nil, 0)

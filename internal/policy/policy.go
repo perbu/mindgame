@@ -80,7 +80,7 @@ func (c *Cache) Reload() error {
 	exact := make(map[string]Tier, len(rows))
 	wild := make(map[string]Tier)
 	for _, r := range rows {
-		host := strings.ToLower(r.Host)
+		host := strings.ToLower(strings.TrimSpace(r.Host))
 		if strings.HasPrefix(host, "*.") {
 			// Store suffix keyed without the "*", e.g. ".slack.com".
 			wild[host[1:]] = Tier(r.Tier)

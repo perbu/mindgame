@@ -3,6 +3,7 @@ package ui
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/perbu/mindgame/internal/db"
@@ -35,7 +36,7 @@ func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDomainCreate(w http.ResponseWriter, r *http.Request) {
-	host := r.FormValue("host")
+	host := strings.ToLower(strings.TrimSpace(r.FormValue("host")))
 	tier := r.FormValue("tier")
 	note := r.FormValue("note")
 
