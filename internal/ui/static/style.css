@@ -53,7 +53,7 @@ nav a.active { background: var(--bg-input); color: var(--text); font-weight: 600
 
 /* Layout */
 .container {
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 1.5rem;
 }
@@ -310,10 +310,41 @@ tr.expanded { background: rgba(108, 140, 255, 0.08); }
 
 /* Truncate */
 .truncate {
-    max-width: 300px;
+    max-width: 350px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* Wide table — no fixed layout so columns size to content */
+.table-wide {
+    width: 100%;
+    table-layout: auto;
+}
+
+/* Feed header with title + download */
+.feed-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+}
+
+.feed-header h1 { margin-bottom: 0; }
+
+/* Pagination */
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin-top: 1rem;
+    padding: 0.5rem 0;
+}
+
+.page-info {
+    color: var(--text-dim);
+    font-size: 0.85rem;
 }
 
 /* Monospace */

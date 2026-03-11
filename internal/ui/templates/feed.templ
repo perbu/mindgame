@@ -36,11 +36,14 @@ func scoreClass(score int) string {
 	}
 }
 
-templ FeedPage(entries []db.AuditEntry) {
+templ FeedPage(entries []db.AuditEntry, page int, hasMore bool) {
 	@Layout("Live Feed", "feed") {
-		<h1>Live Feed</h1>
+		<div class="feed-header">
+			<h1>Live Feed</h1>
+			<a href="/feed/export" class="btn btn-secondary btn-sm" download>Download Markdown</a>
+		</div>
 		<div class="card">
-			<table>
+			<table class="table-wide">
 				<thead>
 					<tr>
 						<th>ID</th>
@@ -53,12 +56,28 @@ templ FeedPage(entries []db.AuditEntry) {
 						<th>Reason</th>
 					</tr>
 				</thead>
-				<tbody id="feed-body" hx-ext="sse" sse-connect="/feed/events" sse-swap="message" hx-swap="afterbegin">
+				<tbody id="feed-body"
+					if page == 1 {
+						hx-ext="sse"
+						sse-connect="/feed/events"
+						sse-swap="message"
+						hx-swap="afterbegin"
+					}
+				>
 					for _, e := range entries {
 						@FeedRow(e)
 					}
 				</tbody>
 			</table>
+		</div>
+		<div class="pagination">
+			if page > 1 {
+				<a href={ templ.SafeURL(fmt.Sprintf("/?page=%d", page-1)) } class="btn btn-secondary btn-sm">&larr; Newer</a>
+			}
+			<span class="page-info">Page { fmt.Sprintf("%d", page) }</span>
+			if hasMore {
+				<a href={ templ.SafeURL(fmt.Sprintf("/?page=%d", page+1)) } class="btn btn-secondary btn-sm">Older &rarr;</a>
+			}
 		</div>
 		<script>
 			function toggleDetail(row) {

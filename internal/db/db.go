@@ -460,6 +460,7 @@ type AuditFilter struct {
 	After    time.Time
 	Before   time.Time
 	Limit    int
+	Offset   int
 	AfterID  int64
 }
 
@@ -505,6 +506,10 @@ func (s *Store) ListAuditEntriesFiltered(f AuditFilter) ([]AuditEntry, error) {
 	}
 	query += " LIMIT ?"
 	args = append(args, limit)
+	if f.Offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, f.Offset)
+	}
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -801,6 +806,13 @@ func (s *Store) DeleteAuditEntriesBefore(t time.Time, batchSize int) (int64, err
 		}
 	}
 	return total, nil
+}
+
+// CountAuditEntries returns the total number of audit log entries.
+func (s *Store) CountAuditEntries() (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM audit_log`).Scan(&count)
+	return count, err
 }
 
 // IncrementalVacuum runs an incremental vacuum to reclaim free pages.

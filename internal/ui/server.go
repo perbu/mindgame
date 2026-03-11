@@ -50,6 +50,7 @@ func NewServer(store *db.Store, pol *policy.Cache, reloadScorer func() error, re
 	protected.HandleFunc("GET /{$}", s.handleFeed)
 	protected.HandleFunc("GET /feed/events", s.handleFeedSSE)
 	protected.HandleFunc("GET /feed/detail/{id}", s.handleFeedDetail)
+	protected.HandleFunc("GET /feed/export", s.handleFeedExport)
 
 	// Domains
 	protected.HandleFunc("GET /domains", s.handleDomains)
