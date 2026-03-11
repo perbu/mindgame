@@ -140,7 +140,7 @@ func DefaultResponseRules() []db.ScoringRule {
 		},
 		{
 			Name:    "resp_hidden_text",
-			Expr:    `body.matches("(?i)(display:\\s*none|visibility:\\s*hidden|font-size:\\s*0|color:\\s*transparent)") || body.matches("(?s)<!--.{500,}-->")`,
+			Expr:    `body.matches("(?i)(font-size:\\s*0|color:\\s*transparent)") || body.matches("(?s)<!--.{500,}-->")`,
 			Points:  5,
 			Enabled: true,
 			Note:    "Response contains hidden text via CSS or oversized HTML comments",
@@ -161,10 +161,10 @@ func DefaultResponseRules() []db.ScoringRule {
 		},
 		{
 			Name:    "resp_tool_abuse",
-			Expr:    `body.matches("(?i)(execute this command|run this code|<script[^>]*>)") || body.matches("(?i)(eval\\(|exec\\(|system\\()")`,
+			Expr:    `body.matches("(?i)(execute this command|run this code)") || body.matches("(?i)(eval\\(|exec\\(|system\\()")`,
 			Points:  5,
 			Enabled: true,
-			Note:    "Response contains command execution or script injection patterns",
+			Note:    "Response contains command execution or code injection patterns",
 		},
 	}
 }
